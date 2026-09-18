@@ -1,22 +1,29 @@
 package eu.kanade.tachiyomi.extension.fr.softepsilonscan
 
-import android.content.ComponentName
-import android.content.Intent
 import eu.kanade.tachiyomi.multisrc.pam.CheckBoxGroup
 import eu.kanade.tachiyomi.multisrc.pam.Pam
 import eu.kanade.tachiyomi.multisrc.pam.SortFilter
 import eu.kanade.tachiyomi.multisrc.pam.TriStateGroupFilter
 import eu.kanade.tachiyomi.source.model.Filter
 import eu.kanade.tachiyomi.source.model.FilterList
-import eu.kanade.tachiyomi.source.model.Page
-import eu.kanade.tachiyomi.source.model.SChapter
 import keiyoushi.annotation.Source
-import keiyoushi.utils.applicationContext
-import okhttp3.Response
-import org.jsoup.Jsoup
+import okio.ByteString.Companion.decodeHex
 
 @Source
 abstract class SoftEpsilonScan : Pam() {
+
+    override val readerSecret =
+        "8c24f215196b62677462a04f7a02dbd0ef2a49cb8e677b650a3a91440a45ac86".decodeHex().toByteArray()
+
+    override val kdfDomain = "oj8u7bay"
+
+    override fun signedPayload(payload: ByteArray) = readerSecret + payload
+
+    override fun manifestPayload(uid: String, version: Int, ts: Long, nonce: String) = "$ts|$uid|$nonce|$version"
+
+    override fun contentKeyMaterial(sharedSecret: ByteArray, info: ByteArray) = listOf(readerSecret, sharedSecret, info)
+
+    override val contentKeyRounds = 2
 
     override val popularFilters = FilterList(SortFilter("Sort", sortValues, Filter.Sort.Selection(3, false)))
     override val latestFilters = FilterList(SortFilter("Sort", sortValues, Filter.Sort.Selection(2, false)))
@@ -29,55 +36,6 @@ abstract class SoftEpsilonScan : Pam() {
         TypeFilter(),
         StatusFilter(),
     )
-
-    override fun getChapterUrl(chapter: SChapter): String = baseUrl + chapter.url
-
-    override fun pageListParse(response: Response): List<Page> = try {
-        super.pageListParse(response)
-    } catch (e: Exception) {
-        val chapterUrl = response.request.url.toString()
-        val looksBlocked = runCatching {
-            val doc = Jsoup.parse(response.peekBody(Long.MAX_VALUE).string())
-            doc.selectFirst(".cf-turnstile") != null || doc.title().contains("Just a moment", ignoreCase = true) || doc.title()
-                .contains("Attention Required", ignoreCase = true)
-        }.getOrDefault(true) // si le HTML ne parse même pas, on suppose un blocage
-
-        if (!looksBlocked) throw e
-
-        if (isDownloadContext()) {
-            throw Exception("Protégé par Cloudflare, non téléchargeable")
-        }
-
-        val opened = tryOpenWebView(chapterUrl)
-        throw Exception(
-            if (opened) {
-                "Chapitre protégé par Cloudflare : ouverture du WebView, lisez-y le chapitre puis fermez-la."
-            } else {
-                "Chapitre protégé par Cloudflare. Ouvrez-le manuellement via \"Ouvrir dans le WebView\" (menu ⋮)."
-            },
-        )
-    }
-
-    private fun isDownloadContext(): Boolean = Exception().stackTrace.any {
-        it.className.contains("eu.kanade.tachiyomi.data.download", ignoreCase = true) || it.className.contains(
-            "Downloader",
-            ignoreCase = true,
-        )
-    }
-
-    private fun tryOpenWebView(url: String): Boolean = try {
-        val context = applicationContext
-        val intent = Intent().apply {
-            component = ComponentName(context, "eu.kanade.tachiyomi.ui.webview.WebViewActivity")
-            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            putExtra("url_key", url)
-            putExtra("source_key", id)
-        }
-        context.startActivity(intent)
-        true
-    } catch (_: Exception) {
-        false
-    }
 
     private class GenreFilter : TriStateGroupFilter("Genres", genres)
     private class TypeFilter : TriStateGroupFilter("Types", type)
