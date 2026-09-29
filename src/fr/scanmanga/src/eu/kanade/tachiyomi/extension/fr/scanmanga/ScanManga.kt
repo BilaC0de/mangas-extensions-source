@@ -88,19 +88,34 @@ abstract class ScanManga :
 
     // Popular
     override suspend fun getPopularManga(page: Int): MangasPage {
-        val document = client.get("$baseUrl/TOP-Manga-Webtoon-45.html").asJsoup()
+        val offset = (page - 1) * TOP_PAGE_SIZE
+        if (offset >= TOP_MAX) return MangasPage(emptyList(), false)
 
-        val mangas = document.select("#carouselTOPContainer > div.top").mapNotNull { element ->
-            val titleElement = element.selectFirst("a.atop") ?: return@mapNotNull null
+        val postHeaders = headers.newBuilder()
+            .set("Origin", baseUrl)
+            .set("Referer", "$baseUrl/")
+            .set("Accept", "text/html")
+            .set("Content-Type", "application/json; charset=UTF-8")
+            .build()
+        val mediaType = "application/json; charset=UTF-8".toMediaType()
+        val requestBody = """{"offset":$offset,"limit":$TOP_PAGE_SIZE,"top":""}""".toRequestBody(mediaType)
+
+        val fragment = client.post("https://bqj.$domain/top.json", postHeaders, requestBody)
+            .use { it.body.string().trim() }
+
+        val mangas = Jsoup.parseBodyFragment(fragment, baseUrl).select("div.top").mapNotNull { element ->
+            val link = element.selectFirst("a.atop") ?: return@mapNotNull null
+            val mangaTitle = link.text().takeIf { it.isNotBlank() } ?: return@mapNotNull null
 
             SManga.create().apply {
-                title = titleElement.text()
-                setUrlWithoutDomain(titleElement.absUrl("href"))
+                title = mangaTitle
+                setUrlWithoutDomain(link.absUrl("href"))
                 thumbnail_url = element.extractThumbnail()
             }
         }
 
-        return MangasPage(mangas, false)
+        val hasNextPage = mangas.size >= TOP_PAGE_SIZE && offset + TOP_PAGE_SIZE < TOP_MAX
+        return MangasPage(mangas.distinctBy { it.url }, hasNextPage)
     }
 
     /**

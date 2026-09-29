@@ -2,6 +2,9 @@ package eu.kanade.tachiyomi.extension.fr.scanmanga
 
 import kotlinx.serialization.Serializable
 
+internal const val TOP_PAGE_SIZE = 50
+internal const val TOP_MAX = 5000
+
 @Serializable
 class ChapterPage(
     val f: String, // filename
