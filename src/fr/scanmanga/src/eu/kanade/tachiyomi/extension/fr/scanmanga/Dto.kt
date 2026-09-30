@@ -4,6 +4,8 @@ import kotlinx.serialization.Serializable
 
 internal const val TOP_PAGE_SIZE = 50
 internal const val TOP_MAX = 5000
+internal const val TOP_USER_AGENT =
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36"
 
 @Serializable
 class ChapterPage(

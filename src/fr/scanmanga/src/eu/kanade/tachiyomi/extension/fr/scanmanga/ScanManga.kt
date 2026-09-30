@@ -91,9 +91,11 @@ abstract class ScanManga :
         val offset = (page - 1) * TOP_PAGE_SIZE
         if (offset >= TOP_MAX) return MangasPage(emptyList(), false)
 
+        val siteUrl = "https://www.$domain"
         val postHeaders = headers.newBuilder()
-            .set("Origin", baseUrl)
-            .set("Referer", "$baseUrl/")
+            .set("User-Agent", TOP_USER_AGENT)
+            .set("Origin", siteUrl)
+            .set("Referer", "$siteUrl/TOP-Manga-Webtoon-47.html")
             .set("Accept", "text/html")
             .set("Content-Type", "application/json; charset=UTF-8")
             .build()
@@ -103,14 +105,29 @@ abstract class ScanManga :
         val fragment = client.post("https://bqj.$domain/top.json", postHeaders, requestBody)
             .use { it.body.string().trim() }
 
-        val mangas = Jsoup.parseBodyFragment(fragment, baseUrl).select("div.top").mapNotNull { element ->
-            val link = element.selectFirst("a.atop") ?: return@mapNotNull null
-            val mangaTitle = link.text().takeIf { it.isNotBlank() } ?: return@mapNotNull null
+        val document = Jsoup.parseBodyFragment(fragment, siteUrl)
+
+        val mangas = document.select("div.image_listing").mapNotNull { element ->
+            val link = element.selectFirst("a[href]") ?: return@mapNotNull null
+            val mangaTitle = element.selectFirst("img")?.attr("title")
+                ?.takeIf { it.isNotBlank() }
+                ?: return@mapNotNull null
 
             SManga.create().apply {
                 title = mangaTitle
                 setUrlWithoutDomain(link.absUrl("href"))
                 thumbnail_url = element.extractThumbnail()
+            }
+        }.ifEmpty {
+            document.select("div.top").mapNotNull { element ->
+                val link = element.selectFirst("a.atop") ?: return@mapNotNull null
+                val mangaTitle = link.text().takeIf { it.isNotBlank() } ?: return@mapNotNull null
+
+                SManga.create().apply {
+                    title = mangaTitle
+                    setUrlWithoutDomain(link.absUrl("href"))
+                    thumbnail_url = element.extractThumbnail()
+                }
             }
         }
 
