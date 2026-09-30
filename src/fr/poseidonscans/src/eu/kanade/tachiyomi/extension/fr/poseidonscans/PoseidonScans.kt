@@ -2,9 +2,7 @@ package eu.kanade.tachiyomi.extension.fr.poseidonscans
 
 import android.content.SharedPreferences
 import androidx.preference.CheckBoxPreference
-import androidx.preference.EditTextPreference
 import androidx.preference.PreferenceScreen
-import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.source.ConfigurableSource
 import eu.kanade.tachiyomi.source.model.Filter
 import eu.kanade.tachiyomi.source.model.FilterList
@@ -12,67 +10,59 @@ import eu.kanade.tachiyomi.source.model.MangasPage
 import eu.kanade.tachiyomi.source.model.Page
 import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
-import eu.kanade.tachiyomi.source.online.HttpSource
+import eu.kanade.tachiyomi.source.model.SMangaUpdate
 import keiyoushi.annotation.Source
+import keiyoushi.network.get
+import keiyoushi.source.KeiSource
 import keiyoushi.utils.asJsoup
 import keiyoushi.utils.extractNextJs
 import keiyoushi.utils.extractNextJsRsc
+import keiyoushi.utils.firstInstanceOrNull
 import keiyoushi.utils.getPreferencesLazy
 import keiyoushi.utils.parseAs
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
+import kotlinx.serialization.json.JsonElement
+import okhttp3.CacheControl
+import okhttp3.Headers
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.Request
-import okhttp3.Response
+import org.jsoup.nodes.Document
 import java.net.URLDecoder
-import java.text.SimpleDateFormat
-import java.util.Date
+import java.time.Instant
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
 import java.util.Locale
 
 @Source
 abstract class PoseidonScans :
-    HttpSource(),
+    KeiSource(),
     ConfigurableSource {
 
-    override val supportsLatest = true
+    val rscHeaders: Headers get() = headers.newBuilder().add("RSC", "1").build()
 
     private val preferences: SharedPreferences by getPreferencesLazy()
 
-    private val defaultDomain = "https://poseidon-scans.net"
+    // /series is protected by Cloudflare: opening it in the WebView lets the user solve the challenge once.
+    override fun getHomeUrl(): String = "$baseUrl/series"
 
-    // Le vrai domaine, utilisé pour toutes les requêtes
-    private val domain: String
-        get() = preferences.getString(DOMAIN_PREF, defaultDomain)!!.trimEnd('/')
-
-    // baseUrl pointe sur /series (page protégée par Cloudflare).
-    // Le WebView de Mihon ouvre directement cette URL → l'utilisateur résout
-    // Cloudflare une fois, et tout fonctionne ensuite.
-    override val baseUrl: String
-        get() = "$domain/series"
-
-    val rscHeaders = headersBuilder().add("RSC", "1").build()
-
-    private fun String.toAbsoluteUrl(): String = if (this.startsWith("http")) this else domain + this
+    private fun String.toAbsoluteUrl(): String = if (this.startsWith("http")) this else baseUrl + this
 
     private fun String.toApiCoverUrl(): String {
         if (this.startsWith("http")) return this
-        if (this.contains("storage/covers/")) return "$domain/api/covers/${this.substringAfter("storage/covers/")}"
-        if (this.startsWith("/api/covers/")) return domain + this
-        if (this.startsWith("/")) return domain + this
-        return "$domain/api/covers/$this"
+        if (this.contains("storage/covers/")) return "$baseUrl/api/covers/${this.substringAfter("storage/covers/")}"
+        if (this.startsWith("/api/covers/")) return baseUrl + this
+        if (this.startsWith("/")) return baseUrl + this
+        return "$baseUrl/api/covers/$this"
     }
 
-    // Ces overrides sont nécessaires car baseUrl = domain/series,
-    // mais les pages manga sont à domain/serie/... (sans 's').
-    // Sans eux, Mihon construirait domain/series/serie/slug → 404.
-    override fun mangaDetailsRequest(manga: SManga): Request = GET(domain + manga.url, headers)
-    override fun chapterListRequest(manga: SManga): Request = GET(domain + manga.url, rscHeaders)
-    override fun pageListRequest(chapter: SChapter): Request = GET(domain + chapter.url, rscHeaders)
+    // found /manga/all too
 
     // =============================== Latest ===============================
 
-    override fun latestUpdatesRequest(page: Int): Request = GET("$domain/api/manga/lastchapters?limit=16&page=$page", headers)
+    override suspend fun getLatestUpdates(page: Int): MangasPage {
+        val apiResponse = client.get("$baseUrl/api/manga/lastchapters?limit=16&page=$page").parseAs<LatestApiResponse>()
 
-    override fun latestUpdatesParse(response: Response): MangasPage {
-        val apiResponse = response.parseAs<LatestApiResponse>()
         val mangas = apiResponse.data.map { apiManga ->
             SManga.create().apply {
                 title = apiManga.title
@@ -80,39 +70,55 @@ abstract class PoseidonScans :
                 thumbnail_url = apiManga.slug.toApiCoverUrl() + ".webp"
             }
         }
-        return MangasPage(mangas, mangas.size == 16)
+        val hasNextPage = mangas.size == 16
+        return MangasPage(mangas, hasNextPage)
     }
 
     // ============================== Popular ===============================
 
-    // On utilise /series?sortBy=popular (liste paginée complète)
-    // et non la page d'accueil RSC qui ne contient que ~5 mangas mis en avant.
-    override fun popularMangaRequest(page: Int): Request {
-        val url = domain.toHttpUrl().newBuilder().apply {
+    // The RSC home page only contains ~5 featured manga, so we use the full paginated list instead.
+    override suspend fun getPopularManga(page: Int): MangasPage {
+        val url = baseUrl.toHttpUrl().newBuilder().apply {
             addPathSegment("series")
             addQueryParameter("sortBy", "popular")
             if (page > 1) addQueryParameter("page", page.toString())
         }.build()
-        return GET(url, headers)
-    }
 
-    override fun popularMangaParse(response: Response): MangasPage = searchMangaParse(response)
+        return parseMangaList(client.get(url).asJsoup())
+    }
 
     // =========================== Manga Details ============================
 
-    override fun mangaDetailsParse(response: Response): SManga {
-        val document = response.asJsoup()
+    override suspend fun fetchMangaUpdate(
+        manga: SManga,
+        chapters: List<SChapter>,
+        fetchDetails: Boolean,
+        fetchChapters: Boolean,
+    ): SMangaUpdate = coroutineScope {
+        val details = if (fetchDetails) async { fetchDetails(manga) } else null
+        val chapterList = if (fetchChapters) async { fetchChapterList(manga) } else null
+
+        SMangaUpdate(details?.await() ?: manga, chapterList?.await() ?: chapters)
+    }
+
+    private suspend fun fetchDetails(manga: SManga): SManga {
+        val document = client.get(getMangaUrl(manga)).asJsoup()
         val mangaDto = document.extractNextJs<MangaDetailsData>() ?: throw Exception("Cant scape data from Next.js")
 
         return SManga.create().apply {
             title = mangaDto.title
-            thumbnail_url = "$domain/api/covers/${mangaDto.slug}.webp"
+            thumbnail_url = "$baseUrl/api/covers/${mangaDto.slug}.webp"
             author = mangaDto.author
             artist = mangaDto.artist
-            genre = mangaDto.categories.mapNotNull { it.name.trim().takeIf { name -> name.isNotBlank() } }
-                .joinToString(", ") { it.replaceFirstChar { char -> char.titlecase(Locale.FRENCH) } }
+
+            genre = mangaDto.categories.mapNotNull { it.name.trim().takeIf { name -> name.isNotBlank() } }.joinToString {
+                it.replaceFirstChar { char -> char.titlecase(Locale.FRENCH) }
+            }
+
             status = parseStatus(mangaDto.status)
+
             description = mangaDto.description.trim().takeIf { it.isNotEmpty() }
+
             setUrlWithoutDomain("/serie/${mangaDto.slug}")
         }
     }
@@ -127,24 +133,26 @@ abstract class PoseidonScans :
 
     // ============================== Chapters ==============================
 
-    override fun chapterListParse(response: Response): List<SChapter> {
-        val url = response.request.url
-        val rscBody = response.body.string()
+    private suspend fun fetchChapterList(manga: SManga): List<SChapter> {
+        val url = getMangaUrl(manga).toHttpUrl()
+        val rscBody = client.get(url, rscHeaders).use { it.body.string() }
         val chapters = chapterListRsc(rscBody)
         if (chapters.isNotEmpty()) return chapters
 
-        // Les données RSC peuvent être partielles au premier chargement — on réessaie
+        // RSC data can be partial on first load; retry with cache-busting
         val retryUrl = url.newBuilder().addQueryParameter("_", System.currentTimeMillis().toString()).build()
-        val retryRequest = response.request.newBuilder().url(retryUrl).header("Cache-Control", "no-cache").build()
-        val retryResponse = client.newCall(retryRequest).execute()
-        return chapterListRsc(retryResponse.body.string())
+        val retryBody = client.get(retryUrl, rscHeaders, CacheControl.Builder().noCache().build(), ensureSuccess = false)
+            .use { it.body.string() }
+        return chapterListRsc(retryBody)
     }
 
     fun chapterListRsc(rscBody: String): List<SChapter> {
         val mangaPageDto = rscBody.extractNextJsRsc<MangaPageDetailsData>() ?: throw Exception("Cant scape data from Next.js")
 
-        val showPremium = preferences.getBoolean(SHOW_PREMIUM_KEY, SHOW_PREMIUM_DEFAULT)
-
+        val showPremium = preferences.getBoolean(
+            SHOW_PREMIUM_KEY,
+            SHOW_PREMIUM_DEFAULT,
+        )
         return mangaPageDto.manga.chapters.mapNotNull { ch ->
             val isLocked = ch.isPremium == true && mangaPageDto.isPremiumUser != true
 
@@ -152,45 +160,62 @@ abstract class PoseidonScans :
                 val premiumUntilDate = ch.premiumUntil?.time ?: 0L
                 if (System.currentTimeMillis() <= premiumUntilDate) return@mapNotNull null
             }
-
             SChapter.create().apply {
                 val chapterNumberString = ch.number.toString().removeSuffix(".0")
                 val isVolume = ch.isVolume == true || (ch.number % 1 == 0f && ch.title?.contains("volume", ignoreCase = true) == true)
-                val baseName = if (isVolume) "Volume $chapterNumberString" else "Chapitre $chapterNumberString"
+
+                val baseName = if (isVolume) {
+                    "Volume $chapterNumberString"
+                } else {
+                    "Chapitre $chapterNumberString"
+                }
                 val title = ch.title?.trim()?.takeIf { it.isNotBlank() }
 
                 name = buildString {
                     if (isLocked) append("🔒 ")
-                    append(if (title != null) "$baseName - $title" else baseName)
+
+                    append(
+                        if (title != null) {
+                            "$baseName - $title"
+                        } else {
+                            baseName
+                        },
+                    )
+
                     if (isLocked) {
-                        val dateParts = formatTimestamp(ch.premiumUntil?.time ?: 0L).split(" ")
-                        append(" - Free the ${dateParts.take(2).joinToString(" ")} at ${dateParts.getOrNull(2) ?: ""}")
+                        val dateParts = formatTimestamp(
+                            ch.premiumUntil?.time ?: 0L,
+                        ).split(" ")
+                        // formatTimestamp gives: [dd, MMMM, HH:mm]
+                        append(
+                            " - Free the ${dateParts.take(2).joinToString(" ")} at ${dateParts.getOrNull(2) ?: ""}",
+                        )
                     }
                 }.trim()
-
-                setUrlWithoutDomain("/serie/${mangaPageDto.manga.slug}/chapter/$chapterNumberString")
+                setUrlWithoutDomain(
+                    "/serie/${mangaPageDto.manga.slug}/chapter/$chapterNumberString",
+                )
                 date_upload = ch.createdAt.time
                 chapter_number = ch.number
             }
         }.sortedByDescending { it.chapter_number }
     }
 
-    fun formatTimestamp(timestamp: Long): String = SimpleDateFormat("dd MMMM HH:mm", Locale.getDefault()).format(Date(timestamp))
+    fun formatTimestamp(timestamp: Long): String = DateTimeFormatter.ofPattern("dd MMMM HH:mm", Locale.getDefault())
+        .format(Instant.ofEpochMilli(timestamp).atZone(ZoneId.systemDefault()))
 
     // =============================== Pages ================================
 
-    override fun pageListParse(response: Response): List<Page> {
-        val pageDataDto = response.extractNextJs<PageData>() ?: throw Exception("Cant scape data from Next.js")
-
+    override suspend fun getPageList(chapter: SChapter): List<Page> {
+        val pageDataDto = client.get(getChapterUrl(chapter), rscHeaders).extractNextJs<PageData>() ?: throw Exception("Cant scape data from Next.js")
         if (pageDataDto.currentChapter.isPremium) {
             if (pageDataDto.sessionStatus == "unauthenticated") {
-                throw Exception("Ce chapitre est premium. Connecte-toi via le WebView pour y accéder.")
+                throw Exception("This chapter is premium. Please connect via the WebView to view.")
             }
             if (!pageDataDto.isPremiumUser) {
-                throw Exception("Ce chapitre est premium. Tu n'es pas abonné premium.")
+                throw Exception("This chapter is premium. You are not a premium user.")
             }
         }
-
         return pageDataDto.initialData.images.map { pageDto ->
             Page(
                 index = pageDto.order,
@@ -199,69 +224,66 @@ abstract class PoseidonScans :
         }.sortedBy { it.index }
     }
 
-    override fun imageRequest(page: Page): Request {
-        val imageHeaders = headersBuilder().set("Accept", "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8")
-            .set("Referer", page.url.ifBlank { "$domain/" }).build()
-        return GET(page.imageUrl!!, imageHeaders)
-    }
-
-    override fun imageUrlParse(response: Response): String = throw UnsupportedOperationException()
+    override fun imageRequest(page: Page): Request = super.imageRequest(page).newBuilder()
+        .header("Accept", "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8")
+        .build()
 
     // =============================== Search ===============================
 
-    override fun searchMangaRequest(page: Int, query: String, filters: FilterList): Request {
-        val url = domain.toHttpUrl().newBuilder().apply {
+    override suspend fun getSearchMangaList(page: Int, query: String, filters: FilterList): MangasPage {
+        val url = baseUrl.toHttpUrl().newBuilder().apply {
             addPathSegment("series")
-            if (query.isNotBlank()) addQueryParameter("search", query)
-            if (page > 1) addQueryParameter("page", page.toString())
-
-            filters.forEach { filter ->
-                when (filter) {
-                    is SortFilter -> addQueryParameter("sortBy", filter.getValue())
-                    is StatusFilter -> filter.getValue()?.let { addQueryParameter("status", it) }
-                    is TypeFilter -> {
-                        val selected = filter.getValues()
-                        if (selected.isNotEmpty()) addQueryParameter("tags", selected.joinToString(","))
-                    }
-
-                    is GenreFilter -> {
-                        val selected = filter.getValues()
-                        if (selected.isNotEmpty()) addQueryParameter("tags", selected.joinToString(","))
-                    }
-
-                    is MinChaptersFilter -> if (filter.state.isNotBlank()) addQueryParameter("minChapters", filter.state)
-                    is MaxChaptersFilter -> if (filter.state.isNotBlank()) addQueryParameter("maxChapters", filter.state)
-                    else -> {}
-                }
+            if (query.isNotBlank()) {
+                addQueryParameter("search", query)
             }
+            if (page > 1) {
+                addQueryParameter("page", page.toString())
+            }
+
+            filters.firstInstanceOrNull<SortFilter>()?.let { addQueryParameter("sortBy", it.toUriPart()) }
+            filters.firstInstanceOrNull<StatusFilter>()?.toUriPart()?.let { addQueryParameter("status", it) }
+
+            // Type and genres share the same "tags" query parameter
+            val tags = buildList {
+                filters.firstInstanceOrNull<TypeFilter>()?.let { addAll(it.getValues()) }
+                filters.firstInstanceOrNull<GenreFilter>()?.let { addAll(it.getValues()) }
+            }
+            if (tags.isNotEmpty()) addQueryParameter("tags", tags.joinToString(","))
+
+            filters.firstInstanceOrNull<MinChaptersFilter>()?.state?.takeIf { it.isNotBlank() }
+                ?.let { addQueryParameter("minChapters", it) }
+            filters.firstInstanceOrNull<MaxChaptersFilter>()?.state?.takeIf { it.isNotBlank() }
+                ?.let { addQueryParameter("maxChapters", it) }
         }.build()
-        return GET(url, headers)
+
+        return parseMangaList(client.get(url).asJsoup())
     }
 
-    override fun searchMangaParse(response: Response): MangasPage {
-        val document = response.asJsoup()
-
+    private fun parseMangaList(document: Document): MangasPage {
         val mangas = document.select("div.grid a.block.group").map { element ->
-            val url = element.attr("href")
+            val href = element.attr("href")
             val title = element.selectFirst("h2")?.text()!!
-            val thumbnailUrlPath = element.selectFirst("img[alt]")?.attr("srcset")?.substringBefore(" ")
-                ?.let { URLDecoder.decode(it, "UTF-8").substringAfter("url=").substringBefore("&") }
+
+            val thumbnailUrlPath = element.selectFirst("img[alt]")?.attr("srcset")?.substringBefore(" ")?.let {
+                URLDecoder.decode(it, "UTF-8").substringAfter("url=").substringBefore("&")
+            }
 
             SManga.create().apply {
-                setUrlWithoutDomain(url)
+                setUrlWithoutDomain(href)
                 this.title = title
                 thumbnail_url = thumbnailUrlPath?.takeIf { it.isNotBlank() }?.toApiCoverUrl()
             }
         }
 
         val hasNextPage = document.select("nav[aria-label=Pagination] a:contains(Suivant)").isNotEmpty()
+
         return MangasPage(mangas, hasNextPage)
     }
 
-    // ============================== Filters ==============================
+    // ============================== Filters ===============================
 
-    override fun getFilterList(): FilterList = FilterList(
-        Filter.Header("Les filtres ne fonctionnent pas avec la recherche par texte"),
+    override fun getFilterList(data: JsonElement?): FilterList = FilterList(
+        Filter.Header("Filters are ignored when searching by text"),
         Filter.Separator(),
         SortFilter(),
         StatusFilter(),
@@ -271,12 +293,14 @@ abstract class PoseidonScans :
         MaxChaptersFilter(),
     )
 
+    // Default state = "Popularité" so the filter sheet matches the Popular tab
     private class SortFilter :
         Filter.Select<String>(
             "Tri",
             arrayOf("Ajout Récent (Série)", "Dernier Chapitre", "Plus de chapitres", "Popularité", "Ordre alphabétique"),
+            3,
         ) {
-        fun getValue() = when (state) {
+        fun toUriPart() = when (state) {
             1 -> "latest_chapter"
             2 -> "most_chapters"
             3 -> "popular"
@@ -290,7 +314,7 @@ abstract class PoseidonScans :
             "Statut",
             arrayOf("Tous", "En cours", "Terminé", "En pause", "Annulé"),
         ) {
-        fun getValue() = when (state) {
+        fun toUriPart(): String? = when (state) {
             1 -> "en cours"
             2 -> "terminé"
             3 -> "en pause"
@@ -299,78 +323,64 @@ abstract class PoseidonScans :
         }
     }
 
-    private class TypeCheckBox(name: String) : Filter.CheckBox(name)
+    private class TagCheckBox(name: String) : Filter.CheckBox(name)
+
     private class TypeFilter :
-        Filter.Group<TypeCheckBox>(
+        Filter.Group<TagCheckBox>(
             "Type",
-            listOf(
-                TypeCheckBox("MANGA"),
-                TypeCheckBox("MANHUA"),
-                TypeCheckBox("MANHWA"),
-                TypeCheckBox("WEBTOON"),
-            ),
+            listOf("MANGA", "MANHUA", "MANHWA", "WEBTOON").map(::TagCheckBox),
         ) {
         fun getValues() = state.filter { it.state }.map { it.name }
     }
 
-    private class GenreCheckBox(name: String) : Filter.CheckBox(name)
     private class GenreFilter :
-        Filter.Group<GenreCheckBox>(
+        Filter.Group<TagCheckBox>(
             "Genres",
             listOf(
-                GenreCheckBox("Délinquant"),
-                GenreCheckBox("Détective"),
-                GenreCheckBox("Drama"),
-                GenreCheckBox("Ecchi"),
-                GenreCheckBox("Fantaisie"),
-                GenreCheckBox("Fantastique"),
-                GenreCheckBox("Mystère"),
-                GenreCheckBox("Necromancer"),
-                GenreCheckBox("Portail/Donjon"),
-                GenreCheckBox("Psychologique"),
-                GenreCheckBox("Réincarnation"),
-                GenreCheckBox("Regression"),
-                GenreCheckBox("Romance"),
-                GenreCheckBox("Shojo"),
-                GenreCheckBox("Shonen"),
-                GenreCheckBox("Sports"),
-                GenreCheckBox("Super pouvoirs"),
-                GenreCheckBox("Surnaturel"),
-                GenreCheckBox("Systeme"),
-                GenreCheckBox("Tour"),
-                GenreCheckBox("Tragique"),
-                GenreCheckBox("Vengeance"),
-                GenreCheckBox("Vie scolaire"),
-            ),
+                "Délinquant",
+                "Détective",
+                "Drama",
+                "Ecchi",
+                "Fantaisie",
+                "Fantastique",
+                "Mystère",
+                "Necromancer",
+                "Portail/Donjon",
+                "Psychologique",
+                "Réincarnation",
+                "Regression",
+                "Romance",
+                "Shojo",
+                "Shonen",
+                "Sports",
+                "Super pouvoirs",
+                "Surnaturel",
+                "Systeme",
+                "Tour",
+                "Tragique",
+                "Vengeance",
+                "Vie scolaire",
+            ).map(::TagCheckBox),
         ) {
         fun getValues() = state.filter { it.state }.map { it.name }
     }
 
-    private class MinChaptersFilter : Filter.Text("Chapitres min", "0")
-    private class MaxChaptersFilter : Filter.Text("Chapitres max", "500")
+    // No default state: an empty value means "no limit"
+    private class MinChaptersFilter : Filter.Text("Chapitres min")
+    private class MaxChaptersFilter : Filter.Text("Chapitres max")
 
-    // ========================== Preferences ============================
+    // ========================== Preference =============================
 
     override fun setupPreferenceScreen(screen: PreferenceScreen) {
-        EditTextPreference(screen.context).apply {
-            key = DOMAIN_PREF
-            title = "URL du site"
-            summary = "Modifier si le site change de domaine.\nActuellement : $domain"
-            setDefaultValue(defaultDomain)
-            dialogTitle = "URL du site"
-            dialogMessage = "Entrez l'URL complète, ex : https://poseidon-scans.net"
-        }.also(screen::addPreference)
-
         CheckBoxPreference(screen.context).apply {
             key = SHOW_PREMIUM_KEY
-            title = "Afficher les chapitres premium"
-            summary = "Affiche les chapitres payants (identifiés par 🔒) dans la liste."
+            title = "Show premium chapters"
+            summary = "Show paid chapters (identified by 🔒) in the list."
             setDefaultValue(SHOW_PREMIUM_DEFAULT)
         }.also(screen::addPreference)
     }
 
     companion object {
-        private const val DOMAIN_PREF = "pref_domain"
         private const val SHOW_PREMIUM_KEY = "show_premium_chapters"
         private const val SHOW_PREMIUM_DEFAULT = false
     }
