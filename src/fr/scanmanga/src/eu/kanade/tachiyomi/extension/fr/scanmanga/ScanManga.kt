@@ -25,6 +25,7 @@ import keiyoushi.utils.applicationContext
 import keiyoushi.utils.asJsoup
 import keiyoushi.utils.getPreferencesLazy
 import keiyoushi.utils.parseAs
+import keiyoushi.utils.toJsonRequestBody
 import kotlinx.coroutines.delay
 import okhttp3.CookieJar
 import okhttp3.Headers
@@ -92,17 +93,15 @@ abstract class ScanManga :
         if (offset >= TOP_MAX) return MangasPage(emptyList(), false)
 
         val siteUrl = "https://www.$domain"
-        val postHeaders = headers.newBuilder()
+        val topHeaders = headers.newBuilder()
             .set("User-Agent", TOP_USER_AGENT)
             .set("Origin", siteUrl)
             .set("Referer", "$siteUrl/TOP-Manga-Webtoon-47.html")
             .set("Accept", "text/html")
-            .set("Content-Type", "application/json; charset=UTF-8")
             .build()
-        val mediaType = "application/json; charset=UTF-8".toMediaType()
-        val requestBody = """{"offset":$offset,"limit":$TOP_PAGE_SIZE,"top":""}""".toRequestBody(mediaType)
+        val requestBody = TopRequest(offset, TOP_PAGE_SIZE, "").toJsonRequestBody()
 
-        val fragment = client.post("https://bqj.$domain/top.json", postHeaders, requestBody)
+        val fragment = client.post("https://bqj.$domain/top.json", topHeaders, requestBody)
             .use { it.body.string().trim() }
 
         val document = Jsoup.parseBodyFragment(fragment, siteUrl)

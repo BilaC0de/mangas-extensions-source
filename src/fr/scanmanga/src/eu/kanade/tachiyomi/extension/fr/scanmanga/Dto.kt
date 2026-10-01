@@ -42,3 +42,10 @@ class MangaItemDto(
     val url: String,
     val image: String,
 )
+
+@Serializable
+class TopRequest(
+    private val offset: Int,
+    private val limit: Int,
+    private val top: String,
+)
