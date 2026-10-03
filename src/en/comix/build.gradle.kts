@@ -6,7 +6,7 @@ plugins {
 
 keiyoushi {
     name = "Comix"
-    versionCode = 40
+    versionCode = 42
     contentWarning = ContentWarning.MIXED
     libVersion = "1.6"
 

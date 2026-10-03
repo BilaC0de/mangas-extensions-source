@@ -76,7 +76,7 @@ abstract class Comix :
             if (response.isSuccessful) return@addInterceptor response
 
             val url = request.url.toString()
-            val fallbacks = listOf("/i5/", "/si/", "/i/", "/sii/", "/ii/")
+            val fallbacks = listOf("/hi/", "/fcf/", "/i5/", "/si/", "/i/", "/sii/", "/ii/")
                 .map { url.replaceFirst(SCRAMBLE_PATH_FALLBACK_REGEX, it) }
                 .filter { it != url }
 
@@ -103,10 +103,6 @@ abstract class Comix :
 
             val urlBuilder = request.url.newBuilder()
                 .setQueryParameter("r", attempt.toString())
-
-            if (!request.url.queryParameterNames.contains("8")) {
-                urlBuilder.addQueryParameter("8", null)
-            }
 
             val retryUrl = urlBuilder.build()
             response = chain.proceed(request.newBuilder().url(retryUrl).build())
@@ -671,27 +667,14 @@ abstract class Comix :
         return chapters.map { it.toSChapter(mangaSlug) }
     }
 
-    // V3 grid-scramble pages must NOT send Origin — the server withholds X-Scramble-Seed when
-    // Origin is present. Legacy byte-XOR pages need Origin to receive X-Enc-Seed.
+    // Comix image domains block any image requests with Referer/Origin
     override fun imageRequest(page: Page): Request {
         val imageUrl = page.imageUrl ?: return super.imageRequest(page)
         val urlWithoutFragment = imageUrl.substringBefore('#')
-        val imageHost = urlWithoutFragment.toHttpUrlOrNull()?.host.orEmpty()
-        val isScrambled = imageUrl.contains("#scrambled")
-        val isV3 = urlWithoutFragment.toHttpUrlOrNull()?.queryParameterNames?.contains("v3") == true
-        val isLegacyScramble = isScrambled && !isV3
-        val baseUrlHost = baseUrl.toHttpUrl().host
-        val requestHeaders = if (
-            imageHost.isNotEmpty() &&
-            !imageHost.endsWith(baseUrlHost) &&
-            !isLegacyScramble
-        ) {
-            headersBuilder()
-                .removeAll("Origin")
-                .build()
-        } else {
-            headers
-        }
+        val requestHeaders = headersBuilder()
+            .removeAll("Origin")
+            .removeAll("Referer")
+            .build()
         return GET(urlWithoutFragment, requestHeaders)
     }
 
