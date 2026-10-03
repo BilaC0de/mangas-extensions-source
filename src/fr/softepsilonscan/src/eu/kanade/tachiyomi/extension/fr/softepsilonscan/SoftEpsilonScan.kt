@@ -19,7 +19,7 @@ abstract class SoftEpsilonScan : Pam() {
         val c = write(challenge)
         val p = write(payload)
         val out = alloc(64)
-        check(call("l", c, c.size, p, p.size, out) != 0L) { "signAttestation failed" }
+        check(call("m", c, c.size, p, p.size, out) != 0L) { "signAttestation failed" }
         readText(out)
     }
 
@@ -28,7 +28,7 @@ abstract class SoftEpsilonScan : Pam() {
         val u = write(uid)
         val n = write(nonce)
         val out = alloc(64)
-        check(call("k", t, t.size, version, u, u.size, ts.toDouble(), n, n.size, out) != 0L) { "signManifest failed" }
+        check(call("l", t, t.size, version, u, u.size, ts.toDouble(), n, n.size, out) != 0L) { "signManifest failed" }
         readText(out)
     }
 
@@ -42,12 +42,12 @@ abstract class SoftEpsilonScan : Pam() {
         val priv = write(privateKey)
         val server = write(serverPubkey)
         val clientPub = alloc(32)
-        check(call("f", priv, priv.size, server, server.size, clientPub) != 0L) { "ecdhInit failed" }
+        check(call("g", priv, priv.size, server, server.size, clientPub) != 0L) { "ecdhInit failed" }
 
         val u = write(uid)
         val h = write(hint)
         val out = alloc(32)
-        check(call("j", u, u.size, keyVersion, h, h.size, out) != 0L) { "kdfRot failed" }
+        check(call("k", u, u.size, keyVersion, h, h.size, out) != 0L) { "kdfRot failed" }
         read(out)
     }
 

@@ -125,12 +125,15 @@ class PageListResponse(
         @SerialName("reader_v2")
         val readerV2: Boolean = false,
         val attestation: Attestation? = null,
+        @SerialName("captcha_passed")
+        val captchaPassed: Boolean? = null,
         val data: Data,
     ) {
         @Serializable
         class Data(
-            val uid: String,
+            val uid: String? = null,
             val slug: String,
+            val captcha: Int? = null,
             val serie: Serie,
         )
 

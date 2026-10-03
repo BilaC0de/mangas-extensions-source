@@ -33,6 +33,9 @@ internal class ReaderWasmManager(
         if (!expired) {
             cached?.let { return it }
             stored()?.let { return it.also { cached = it } }
+            // Checked recently but nothing usable was downloaded (e.g. the release targets another
+            // parser version): use the bundled module without hitting the network again.
+            return bundled()
         }
         return fetch() ?: stored() ?: bundled()
     }
@@ -47,7 +50,10 @@ internal class ReaderWasmManager(
         return preferences.getString(PREF_FILE, null) != before
     }
 
-    private fun stored(): ByteArray? = preferences.getString(PREF_WASM, null)?.let { Base64.decode(it, Base64.DEFAULT) }
+    private fun stored(): ByteArray? = preferences
+        .takeIf { it.getInt(PREF_PARSER_VERSION, 0) == PARSER_VERSION }
+        ?.getString(PREF_WASM, null)
+        ?.let { Base64.decode(it, Base64.DEFAULT) }
 
     private fun fetch(): ByteArray? = runCatching {
         val body = client.newCall(GET(MANIFEST_URL)).execute().use { response ->
@@ -63,7 +69,7 @@ internal class ReaderWasmManager(
         require(file.matches(FILENAME_REGEX) && ".." !in file) { "Rejected reader module filename: $file" }
 
         if (file == preferences.getString(PREF_FILE, null)) {
-            return stored()?.also { cached = it }
+            stored()?.let { return it.also { cached = it } }
         }
 
         val wasm = client.newCall(GET(RELEASE_BASE + file)).execute().use { response ->
@@ -73,6 +79,7 @@ internal class ReaderWasmManager(
         preferences.edit()
             .putString(PREF_FILE, file)
             .putString(PREF_WASM, Base64.encodeToString(wasm, Base64.NO_WRAP))
+            .putInt(PREF_PARSER_VERSION, PARSER_VERSION)
             .apply()
         wasm.also { cached = it }
     }.getOrNull()
@@ -86,9 +93,10 @@ internal class ReaderWasmManager(
         const val PREF_WASM = "reader_wasm"
         const val PREF_FILE = "reader_wasm_file"
         const val PREF_CHECKED_AT = "reader_wasm_checked_at"
+        const val PREF_PARSER_VERSION = "reader_wasm_parser_version"
         const val CACHE_TTL_MS = 12 * 60 * 60 * 1000L
 
         /** Bump when the release's modules need Kotlin changes this build does not have. */
-        const val PARSER_VERSION = 1
+        const val PARSER_VERSION = 2
     }
 }

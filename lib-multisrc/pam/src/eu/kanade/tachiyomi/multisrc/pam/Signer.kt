@@ -20,6 +20,24 @@ class Signer(wasm: ByteArray) {
                         FunctionType.of(listOf(ValType.I32), listOf(ValType.I32)),
                     ) { _, _ -> longArrayOf(0) },
                 )
+                .addFunction(
+                    HostFunction(
+                        RESIZE_HEAP_MODULE,
+                        DEOBFUSCATE_NAME,
+                        FunctionType.of(listOf(ValType.I32), emptyList()),
+                    ) { instance, args ->
+                        val ptr = args[0].toInt()
+                        val input = instance.memory().readBytes(ptr, DEOBFUSCATE_SIZE)
+                        val output = ByteArray(DEOBFUSCATE_SIZE) { index ->
+                            val transformed =
+                                (input[DEOBFUSCATE_PERMUTATION[index]].toInt() and 0xff) xor
+                                    DEOBFUSCATE_XOR[index]
+                            ((transformed + DEOBFUSCATE_ADD[index]) and 0xff).toByte()
+                        }
+                        instance.memory().write(ptr, output)
+                        longArrayOf()
+                    },
+                )
                 .build(),
         )
         .build()
@@ -84,8 +102,31 @@ class Signer(wasm: ByteArray) {
     private companion object {
         const val RESIZE_HEAP_MODULE = "a"
         const val RESIZE_HEAP_NAME = "a"
-        const val CTORS = "c"
-        const val MALLOC = "i"
-        const val FREE = "e"
+        const val DEOBFUSCATE_NAME = "b"
+        const val DEOBFUSCATE_SIZE = 64
+        const val CTORS = "d"
+        const val MALLOC = "j"
+        const val FREE = "f"
+
+        val DEOBFUSCATE_PERMUTATION = intArrayOf(
+            25, 51, 53, 43, 48, 32, 20, 2, 14, 50, 1, 17, 44, 46, 28, 40,
+            55, 6, 13, 19, 24, 52, 12, 61, 47, 15, 26, 16, 41, 35, 31, 39,
+            38, 10, 9, 8, 29, 22, 54, 11, 59, 34, 30, 37, 5, 57, 4, 18,
+            7, 60, 23, 42, 49, 3, 62, 27, 63, 0, 45, 58, 56, 36, 21, 33,
+        )
+
+        val DEOBFUSCATE_XOR = intArrayOf(
+            39, 116, 128, 77, 37, 233, 90, 232, 108, 11, 121, 58, 89, 14, 193, 145,
+            221, 166, 213, 222, 248, 158, 127, 35, 47, 106, 127, 83, 19, 181, 198, 19,
+            251, 43, 29, 146, 91, 100, 80, 197, 90, 205, 26, 132, 248, 60, 120, 12,
+            175, 164, 159, 176, 130, 119, 121, 113, 167, 181, 138, 159, 16, 43, 252, 135,
+        )
+
+        val DEOBFUSCATE_ADD = intArrayOf(
+            16, 36, 34, 88, 20, 163, 134, 144, 14, 93, 186, 166, 219, 50, 183, 28,
+            104, 204, 107, 82, 121, 187, 251, 31, 18, 3, 39, 215, 183, 32, 144, 58,
+            101, 38, 81, 165, 202, 145, 219, 63, 198, 207, 182, 225, 239, 229, 45, 16,
+            54, 164, 150, 130, 254, 50, 33, 149, 248, 28, 138, 80, 34, 35, 193, 165,
+        )
     }
 }

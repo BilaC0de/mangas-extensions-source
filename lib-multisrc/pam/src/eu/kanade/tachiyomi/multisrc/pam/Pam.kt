@@ -1,5 +1,7 @@
 package eu.kanade.tachiyomi.multisrc.pam
 
+import android.content.ComponentName
+import android.content.Intent
 import android.util.Base64
 import androidx.preference.PreferenceScreen
 import androidx.preference.SwitchPreferenceCompat
@@ -18,12 +20,14 @@ import keiyoushi.lib.secretstream.State
 import keiyoushi.lib.secretstream.X25519
 import keiyoushi.network.rateLimit
 import keiyoushi.source.KeiSource
+import keiyoushi.utils.applicationContext
 import keiyoushi.utils.asJsoup
 import keiyoushi.utils.firstInstanceOrNull
 import keiyoushi.utils.getPreferencesLazy
 import keiyoushi.utils.parseAs
 import keiyoushi.utils.toJsonRequestBody
 import keiyoushi.utils.tryParseDateTime
+import kotlinx.coroutines.delay
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.Interceptor
@@ -33,18 +37,18 @@ import okhttp3.Request
 import okhttp3.RequestBody
 import okhttp3.Response
 import okhttp3.ResponseBody.Companion.asResponseBody
-import okhttp3.ResponseBody.Companion.toResponseBody
 import okio.Buffer
+import okio.BufferedSource
 import okio.Timeout
 import okio.buffer
 import java.io.IOException
 import java.net.URLDecoder
-import java.nio.ByteBuffer
+import java.security.GeneralSecurityException
 import java.security.MessageDigest
 import java.security.SecureRandom
+import java.time.ZoneOffset
 import java.time.format.DateTimeFormatter
 import java.util.Locale
-import java.util.TimeZone
 import java.util.concurrent.ConcurrentHashMap
 import javax.crypto.Cipher
 import javax.crypto.Mac
@@ -221,54 +225,66 @@ abstract class Pam :
     override fun getMangaUrl(manga: SManga): String = "$baseUrl/serie/${manga.url}"
     override fun getChapterUrl(chapter: SChapter): String = "$baseUrl${chapter.url}"
 
+    override suspend fun getMangaByUrl(url: HttpUrl): SManga? {
+        if (url.host != baseUrl.toHttpUrl().host) return null
+        val slug = url.pathSegments.takeIf { it.size >= 2 && it[0] == "serie" }
+            ?.get(1)
+            ?.takeIf(String::isNotEmpty)
+            ?: return null
+        return toSManga(fetchSerie(slug))
+    }
+
+    private fun fetchSerie(slug: String): MangaResponse.Props.Manga {
+        val request = apiRequest(
+            "$baseUrl/serie/$slug".toHttpUrl(),
+            includeXSRFToken = true,
+            includeCSRFToken = false,
+            includeVersion = true,
+        )
+
+        return client.newCall(request).execute().parseAs<MangaResponse>().props.serie
+    }
+
+    private fun toSManga(data: MangaResponse.Props.Manga): SManga = SManga.create().apply {
+        url = data.slug
+        title = data.title
+        thumbnail_url = createThumbnailUrl(data.image)
+        author = data.author
+        artist = data.artist
+        description = buildString {
+            data.description?.also {
+                append(it.trim(), "\n\n")
+            }
+            data.releaseYear?.also {
+                append(intl["release_year"], ": ", it, "\n\n")
+            }
+            data.alternativeName?.also {
+                append(intl["alternative_names"], ": ", it)
+            }
+        }.trim()
+        genre = buildList {
+            data.type?.name?.also(::add)
+            data.genres.mapTo(this) { it.name }
+        }.joinToString()
+        status = when (data.status?.lowercase()) {
+            "ongoing", "upcoming" -> SManga.ONGOING
+            "finished" -> SManga.COMPLETED
+            "dropped" -> SManga.CANCELLED
+            "onhold" -> SManga.ON_HIATUS
+            else -> SManga.UNKNOWN
+        }
+    }
+
     override suspend fun fetchMangaUpdate(
         manga: SManga,
         chapters: List<SChapter>,
         fetchDetails: Boolean,
         fetchChapters: Boolean,
     ): SMangaUpdate {
-        val request = apiRequest(
-            getMangaUrl(manga).toHttpUrl(),
-            includeXSRFToken = true,
-            includeCSRFToken = false,
-            includeVersion = true,
-        )
-
-        val response = client.newCall(request).execute()
-        val data = response.parseAs<MangaResponse>().props.serie
-
-        val manga = SManga.create().apply {
-            url = data.slug
-            title = data.title
-            thumbnail_url = createThumbnailUrl(data.image)
-            author = data.author
-            artist = data.artist
-            description = buildString {
-                data.description?.also {
-                    append(it.trim(), "\n\n")
-                }
-                data.releaseYear?.also {
-                    append(intl["release_year"], ": ", it, "\n\n")
-                }
-                data.alternativeName?.also {
-                    append(intl["alternative_names"], ": ", it)
-                }
-            }.trim()
-            genre = buildList {
-                data.type?.name?.also(::add)
-                data.genres.mapTo(this) { it.name }
-            }.joinToString()
-            status = when (data.status?.lowercase()) {
-                "ongoing", "upcoming" -> SManga.ONGOING
-                "finished" -> SManga.COMPLETED
-                "dropped" -> SManga.CANCELLED
-                "onhold" -> SManga.ON_HIATUS
-                else -> SManga.UNKNOWN
-            }
-        }
+        val data = fetchSerie(manga.url)
 
         val hidePremium = preferences.getBoolean(HIDE_PREMIUM_PREF, false)
-        val chapters = data.chapters.filter { !(it.isPremium && hidePremium) }.map {
+        val chapterList = data.chapters.filter { !(it.isPremium && hidePremium) }.map {
             SChapter.create().apply {
                 url = "/serie/${data.slug}/chapter/${it.slug}"
                 name = buildString {
@@ -278,12 +294,12 @@ abstract class Pam :
                     append(it.title)
                 }
                 date_upload = it.createdAt.substringBefore(".").let { dateStr ->
-                    dateFormat.tryParseDateTime(dateStr)
+                    dateFormat.tryParseDateTime(dateStr, ZoneOffset.UTC)
                 }
             }
         }.asReversed()
 
-        return SMangaUpdate(manga, chapters)
+        return SMangaUpdate(toSManga(data), chapterList)
     }
 
     protected open fun createThumbnailUrl(imagePath: String?): String? {
@@ -291,7 +307,7 @@ abstract class Pam :
         return "$baseUrl$imagePath#$THUMBNAIL_FRAGMENT"
     }
 
-    private val dateFormat = DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss", Locale.US).withZone(TimeZone.getTimeZone("UTC").toZoneId())
+    private val dateFormat = DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss", Locale.US)
 
     override fun setupPreferenceScreen(screen: PreferenceScreen) {
         SwitchPreferenceCompat(screen.context).apply {
@@ -302,6 +318,9 @@ abstract class Pam :
     }
 
     override suspend fun getPageList(chapter: SChapter): List<Page> {
+        // Evaluated first: the call stack no longer shows the Downloader after a thread switch.
+        val isDownload = isDownloadContext()
+
         val url = "$baseUrl${chapter.url}".toHttpUrl()
 
         val request = apiRequest(
@@ -313,8 +332,12 @@ abstract class Pam :
 
         val response = client.newCall(request).execute()
 
-        val body = response.parseAs<PageListResponse>()
+        var body = response.parseAs<PageListResponse>()
+        if (body.props.captchaPending()) {
+            body = awaitCaptcha(chapter, isDownload)
+        }
         val props = body.props
+
         val id = sessionKey(props.data.serie.slug, props.data.slug)
         val state = openChapter(body)
         sessions[id] = state.session
@@ -338,6 +361,62 @@ abstract class Pam :
                 imageUrl = "$baseUrl${manifest.base}$idx$variant.ece#$id",
             )
         }
+    }
+
+    // The server withholds the chapter token until the Turnstile captcha is solved for this chapter.
+    private fun PageListResponse.Props.captchaPending() = data.captcha == 1 && captchaPassed != true
+
+    /**
+     * Opens the chapter in the WebView and polls until the captcha is solved, so the reader
+     * keeps loading on its own once the WebView is closed. Downloads fail right away.
+     */
+    private suspend fun awaitCaptcha(chapter: SChapter, isDownload: Boolean): PageListResponse {
+        if (isDownload) {
+            throw IOException(intl["captcha_download_unavailable"])
+        }
+        if (!tryOpenWebView(getChapterUrl(chapter))) {
+            throw IOException(intl["captcha_webview_failed"])
+        }
+
+        val url = "$baseUrl${chapter.url}".toHttpUrl()
+        val deadline = System.currentTimeMillis() + CAPTCHA_TIMEOUT_MS
+        while (System.currentTimeMillis() < deadline) {
+            delay(CAPTCHA_POLL_MS)
+            val body = try {
+                val request = apiRequest(
+                    url,
+                    includeXSRFToken = true,
+                    includeCSRFToken = false,
+                    includeVersion = true,
+                )
+                client.newCall(request).execute().parseAs<PageListResponse>()
+            } catch (_: IOException) {
+                continue // transient network error, keep waiting
+            }
+            if (!body.props.captchaPending()) return body
+        }
+
+        throw IOException(intl["captcha_timeout"])
+    }
+
+    private fun isDownloadContext(): Boolean = Exception().stackTrace.any {
+        it.className.contains("eu.kanade.tachiyomi.data.download", ignoreCase = true) ||
+            it.className.contains("Downloader", ignoreCase = true)
+    }
+
+    private fun tryOpenWebView(url: String): Boolean = try {
+        val context = applicationContext
+        context.startActivity(
+            Intent().apply {
+                component = ComponentName(context, "eu.kanade.tachiyomi.ui.webview.WebViewActivity")
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                putExtra("url_key", url)
+                putExtra("source_key", id)
+            },
+        )
+        true
+    } catch (_: Exception) {
+        false
     }
 
     /**
@@ -423,7 +502,8 @@ abstract class Pam :
 
             return withSigner {
                 val token = attest(body, clientPubkeyB64)
-                val manifest = requestManifest(props.data.uid, token, clientPubkeyB64)
+                val uid = props.data.uid ?: throw IOException("Chapter uid missing")
+                val manifest = requestManifest(uid, token, clientPubkeyB64)
 
                 ChapterState(
                     ChapterSession(token, shared, clientPubkeyB64, contentKey(manifest, priv, serverPub)),
@@ -564,6 +644,10 @@ abstract class Pam :
                 resp.parseAs<PageListResponse>()
             }
 
+            if (body.props.captchaPending()) {
+                throw IOException(intl["captcha_reopen"])
+            }
+
             val sess = openChapter(body).session
             sessions[id] = sess
             return sess
@@ -636,9 +720,15 @@ abstract class Pam :
         if (session.contentKey != null) {
             if (!response.isSuccessful) return response
 
-            return response.newBuilder().body(
-                decryptEce(response.body.bytes(), session.contentKey).toResponseBody("image/webp".toMediaType()),
-            ).build()
+            return try {
+                response.newBuilder().body(
+                    decryptEce(response.body.source(), session.contentKey).buffer()
+                        .asResponseBody("image/webp".toMediaType()),
+                ).build()
+            } catch (e: Exception) {
+                response.close()
+                throw e
+            }
         }
 
         val pageNameRaw = response.header("X-Page-Name") ?: return response
@@ -707,51 +797,67 @@ abstract class Pam :
             .build()
     }
 
-    /** RFC 8188 `aes128gcm`, the container reader v2 serves its pages in. */
-    private fun decryptEce(payload: ByteArray, ikm: ByteArray): ByteArray {
-        require(payload.size >= 21) { "ece: payload shorter than the header" }
-
-        val salt = payload.copyOfRange(0, 16)
-        val recordSize = ByteBuffer.wrap(payload, 16, 4).int
-        var pos = 21 + (payload[20].toInt() and 0xFF)
-        require(recordSize >= 18 && pos < payload.size) { "ece: malformed header" }
+    /** RFC 8188 `aes128gcm`, the container reader v2 serves its pages in, decrypted record by record. */
+    private fun decryptEce(upstream: BufferedSource, ikm: ByteArray): okio.Source {
+        val salt = upstream.readByteArray(16)
+        val recordSize = upstream.readInt()
+        upstream.skip((upstream.readByte().toInt() and 0xFF).toLong())
+        require(recordSize >= 18 && !upstream.exhausted()) { "ece: malformed header" }
 
         val key = SecretKeySpec(hkdf(ikm, salt, ECE_KEY_INFO, 16), "AES")
         val nonce = hkdf(ikm, salt, ECE_NONCE_INFO, 12)
-        val out = Buffer()
-        var sequence = 0
 
-        while (pos < payload.size) {
-            val record = payload.copyOfRange(pos, minOf(pos + recordSize, payload.size))
-            pos += record.size
-            require(record.size >= 18) { "ece: record $sequence too short" }
+        return object : okio.Source {
+            private val output = Buffer()
+            private var sequence = 0
+            private var isFinished = false
 
-            val iv = nonce.copyOf()
-            var counter = sequence
-            for (i in 11 downTo 0) {
-                if (counter == 0) break
-                iv[i] = (iv[i].toInt() xor (counter and 0xFF)).toByte()
-                counter = counter ushr 8
+            override fun read(sink: Buffer, byteCount: Long): Long {
+                while (output.size == 0L) {
+                    if (isFinished) return -1
+                    decryptRecord()
+                }
+                return output.read(sink, byteCount)
             }
 
-            val plain = Cipher.getInstance("AES/GCM/NoPadding").run {
-                init(Cipher.DECRYPT_MODE, key, GCMParameterSpec(128, iv))
-                doFinal(record)
+            private fun decryptRecord() {
+                upstream.request(recordSize.toLong())
+                val record = upstream.readByteArray(minOf(recordSize.toLong(), upstream.buffer.size))
+                isFinished = upstream.exhausted()
+                require(record.size >= 18) { "ece: record $sequence too short" }
+
+                val iv = nonce.copyOf()
+                var counter = sequence
+                for (i in 11 downTo 0) {
+                    if (counter == 0) break
+                    iv[i] = (iv[i].toInt() xor (counter and 0xFF)).toByte()
+                    counter = counter ushr 8
+                }
+
+                val plain = try {
+                    Cipher.getInstance("AES/GCM/NoPadding").run {
+                        init(Cipher.DECRYPT_MODE, key, GCMParameterSpec(128, iv))
+                        doFinal(record)
+                    }
+                } catch (e: GeneralSecurityException) {
+                    throw IOException("ece: record $sequence failed to decrypt", e)
+                }
+
+                // Records are zero-padded up to a delimiter byte: 2 on the last one, 1 elsewhere.
+                var last = plain.size - 1
+                while (last >= 0 && plain[last].toInt() == 0) last--
+                require(last >= 0 && plain[last].toInt() == if (isFinished) 2 else 1) {
+                    "ece: record $sequence has the wrong delimiter"
+                }
+
+                output.write(plain, 0, last)
+                sequence++
             }
 
-            // Records are zero-padded up to a delimiter byte: 2 on the last one, 1 elsewhere.
-            var last = plain.size - 1
-            while (last >= 0 && plain[last].toInt() == 0) last--
-            val isFinal = pos >= payload.size
-            require(last >= 0 && plain[last].toInt() == if (isFinal) 2 else 1) {
-                "ece: record $sequence has the wrong delimiter"
-            }
+            override fun timeout(): Timeout = upstream.timeout()
 
-            out.write(plain, 0, last)
-            sequence++
+            override fun close() = upstream.close()
         }
-
-        return out.readByteArray()
     }
 
     private fun hkdf(ikm: ByteArray, salt: ByteArray, info: ByteArray, length: Int): ByteArray {
@@ -769,6 +875,8 @@ abstract class Pam :
 
 private const val THUMBNAIL_FRAGMENT = "thumbnail"
 private const val ATTESTATION_ATTEMPTS = 3
+private const val CAPTCHA_POLL_MS = 5_000L
+private const val CAPTCHA_TIMEOUT_MS = 3 * 60 * 1000L
 private const val MANIFEST_VERSION = 2
 private const val MAX_VARIANT_WIDTH = 2160
 private val ECE_KEY_INFO = "Content-Encoding: aes128gcm\u0000".toByteArray()
