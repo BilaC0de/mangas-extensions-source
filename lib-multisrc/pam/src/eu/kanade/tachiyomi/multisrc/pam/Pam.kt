@@ -361,7 +361,8 @@ abstract class Pam :
 
             return withSigner {
                 val token = attest(body, clientPubkeyB64)
-                val manifest = requestManifest(props.data.uid, token, clientPubkeyB64)
+                val uid = props.data.uid ?: throw IOException("Chapter UID missing")
+                val manifest = requestManifest(uid, token, clientPubkeyB64)
 
                 ChapterState(
                     ChapterSession(token, shared, clientPubkeyB64, contentKey(manifest, priv, serverPub)),
