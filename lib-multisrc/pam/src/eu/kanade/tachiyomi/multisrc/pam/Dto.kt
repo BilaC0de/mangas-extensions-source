@@ -76,6 +76,7 @@ class MangaResponse(
         @Serializable
         class Manga(
             val slug: String,
+            val uid: String,
             @JsonNames("name")
             val title: String,
             @JsonNames("cover_image")
@@ -90,7 +91,8 @@ class MangaResponse(
             val status: String? = null,
             val type: Name? = null,
             val genres: List<Name>,
-            val chapters: List<Chapter>,
+            // Deferred on some sites, which then page it through /api/v1/series/{uid}/chapters
+            val chapters: List<Chapter>? = null,
         )
 
         @Serializable
@@ -165,6 +167,7 @@ class AttestationReload(
 @Serializable
 class AttestationResponse(
     val ct: String? = null,
+    val supported: Boolean = true,
 )
 
 @Serializable
@@ -193,3 +196,29 @@ class ManifestRequest(
     val n: String,
     val s: String,
 )
+
+@Serializable
+class ChapterListResponse(
+    val items: List<ChapterListItem>,
+    @SerialName("last_page")
+    val lastPage: Int,
+)
+
+@Serializable
+class ChapterListItem(
+    private val slug: String,
+    private val title: String,
+    private val type: String,
+    @SerialName("free_at")
+    private val freeAt: String? = null,
+    @SerialName("created_at")
+    private val createdAt: String,
+) {
+    /** Premium chapters turn public at [freeAt]. */
+    fun toChapter(isFree: (String) -> Boolean) = MangaResponse.Props.Chapter(
+        slug = slug,
+        title = title,
+        createdAt = createdAt,
+        isPremium = type == "premium" && freeAt?.let(isFree) != true,
+    )
+}

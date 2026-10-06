@@ -5,14 +5,10 @@ plugins {
 dependencies {
     api(project(":lib:secretstream"))
     api(project(":lib:i18n"))
-    api("com.dylibso.chicory:runtime:1.4.0")
+    implementation("com.dylibso.chicory:runtime:1.7.5")
 }
 
 keiyoushi {
-    baseVersionCode = 2
+    baseVersionCode = 0
     libVersion = "1.6"
-
-    deeplink {
-        path("/serie/..*")
-    }
 }

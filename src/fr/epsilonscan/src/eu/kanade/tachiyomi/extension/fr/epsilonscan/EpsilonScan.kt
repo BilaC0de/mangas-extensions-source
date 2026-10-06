@@ -2,7 +2,6 @@ package eu.kanade.tachiyomi.extension.fr.epsilonscan
 
 import eu.kanade.tachiyomi.multisrc.pam.CheckBoxGroup
 import eu.kanade.tachiyomi.multisrc.pam.Pam
-import eu.kanade.tachiyomi.multisrc.pam.Signer
 import eu.kanade.tachiyomi.multisrc.pam.SortFilter
 import eu.kanade.tachiyomi.multisrc.pam.TriStateGroupFilter
 import eu.kanade.tachiyomi.source.model.Filter
@@ -12,44 +11,6 @@ import kotlinx.serialization.json.JsonElement
 
 @Source
 abstract class EpsilonScan : Pam() {
-
-    override val readerId = "epsilonscan"
-
-    override fun Signer.signAttestation(challenge: String, payload: String): String = use {
-        val c = write(challenge)
-        val p = write(payload)
-        val out = alloc(64)
-        check(call("l", c, c.size, p, p.size, out) != 0L) { "signAttestation failed" }
-        readText(out)
-    }
-
-    override fun Signer.signManifest(token: String, version: Int, uid: String, ts: Long, nonce: String): String = use {
-        val t = write(token)
-        val u = write(uid)
-        val n = write(nonce)
-        val out = alloc(64)
-        check(call("k", t, t.size, version, u, u.size, ts.toDouble(), n, n.size, out) != 0L) { "signManifest failed" }
-        readText(out)
-    }
-
-    override fun Signer.deriveContentKey(
-        privateKey: ByteArray,
-        serverPubkey: ByteArray,
-        uid: String,
-        keyVersion: Int,
-        hint: ByteArray,
-    ): ByteArray = use {
-        val priv = write(privateKey)
-        val server = write(serverPubkey)
-        val clientPub = alloc(32)
-        check(call("f", priv, priv.size, server, server.size, clientPub) != 0L) { "ecdhInit failed" }
-
-        val u = write(uid)
-        val h = write(hint)
-        val out = alloc(32)
-        check(call("j", u, u.size, keyVersion, h, h.size, out) != 0L) { "kdfRot failed" }
-        read(out)
-    }
 
     override val popularFilters = FilterList(SortFilter("Sort", sortValues, Filter.Sort.Selection(3, false)))
     override val latestFilters = FilterList(SortFilter("Sort", sortValues, Filter.Sort.Selection(2, false)))
