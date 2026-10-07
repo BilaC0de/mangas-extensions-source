@@ -9,41 +9,56 @@ import eu.kanade.tachiyomi.source.model.SManga
 import eu.kanade.tachiyomi.source.model.SMangaUpdate
 import keiyoushi.annotation.Source
 import keiyoushi.network.get
+import keiyoushi.network.rateLimit
 import keiyoushi.source.KeiSource
 import keiyoushi.utils.extractNextJs
-import keiyoushi.utils.firstInstance
+import keiyoushi.utils.firstInstanceOrNull
 import keiyoushi.utils.parseAs
 import kotlinx.serialization.json.JsonElement
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
+import okhttp3.OkHttpClient
+import kotlin.time.Duration.Companion.seconds
 
 @Source
 abstract class Aniverse : KeiSource() {
 
-    // The site only exposes one listing, ordered by latest chapter release.
-    override val supportsLatest get() = false
+    // Images are served from another host and stay unlimited.
+    override fun OkHttpClient.Builder.configureClient(): OkHttpClient.Builder = rateLimit(permits = 3, period = 1.seconds) { it.host.endsWith("aniverse.fr") }
 
-    override suspend fun getPopularManga(page: Int): MangasPage = fetchMangaList(page, genre = null)
+    override suspend fun getPopularManga(page: Int): MangasPage = fetchSearchList(page)
 
-    override suspend fun getLatestUpdates(page: Int): MangasPage = throw UnsupportedOperationException()
+    // Sorted by the release date of the latest chapter.
+    override suspend fun getLatestUpdates(page: Int): MangasPage = fetchMangaList(page)
 
-    override suspend fun getSearchMangaList(page: Int, query: String, filters: FilterList): MangasPage {
-        if (query.isBlank()) {
-            return fetchMangaList(page, filters.firstInstance<GenreFilter>().value)
-        }
+    override suspend fun getSearchMangaList(page: Int, query: String, filters: FilterList): MangasPage = fetchSearchList(page, filters, query.trim())
 
-        val url = "$baseUrl/api/anime/quicksearch".toHttpUrl().newBuilder()
-            .addQueryParameter("q", query)
-            .addQueryParameter("media", "manga")
-            .build()
-        val mangas = client.get(url).parseAs<List<MangaItemDto>>().map { it.toSManga() }
-        return MangasPage(mangas, false)
+    private suspend fun fetchSearchList(
+        page: Int,
+        filters: FilterList = FilterList(),
+        query: String = "",
+    ): MangasPage {
+        val url = "$baseUrl/api/anime/search".toHttpUrl().newBuilder().apply {
+            addQueryParameter("media", "manga")
+            if (query.isNotEmpty()) addQueryParameter("q", query)
+            filters.firstInstanceOrNull<KindFilter>()?.value?.let { addQueryParameter("kind", it) }
+            filters.firstInstanceOrNull<FormatFilter>()?.values?.forEach { addQueryParameter("type", it) }
+            filters.firstInstanceOrNull<GenreFilter>()?.values?.forEach { addQueryParameter("genres", it) }
+            filters.firstInstanceOrNull<StatusFilter>()?.values?.forEach { addQueryParameter("status", it) }
+            filters.firstInstanceOrNull<YearFilter>()?.value?.let { addQueryParameter("seasonYear", it.toString()) }
+            filters.firstInstanceOrNull<MinRatingFilter>()?.value?.let { addQueryParameter("minRating", it.toString()) }
+            filters.firstInstanceOrNull<MaxRatingFilter>()?.value?.let { addQueryParameter("maxRating", it.toString()) }
+            addQueryParameter("sort", filters.firstInstanceOrNull<SortFilter>()?.value ?: "popularity")
+            addQueryParameter("page", page.toString())
+            addQueryParameter("pageSize", "32")
+        }.build()
+        val dto = client.get(url).parseAs<SearchResultDto>()
+        return MangasPage(dto.data.map { it.toSManga() }, dto.hasNextPage)
     }
 
-    private suspend fun fetchMangaList(page: Int, genre: String?): MangasPage {
+    private suspend fun fetchMangaList(page: Int): MangasPage {
         val url = "$baseUrl/api/manga".toHttpUrl().newBuilder()
             .addQueryParameter("page", page.toString())
-            .apply { if (genre != null) addQueryParameter("genre", genre) }
             .build()
         val dto = client.get(url).parseAs<MangaListDto>()
         return MangasPage(dto.items.map { it.toSManga() }, dto.hasNextPage)
@@ -57,12 +72,20 @@ abstract class Aniverse : KeiSource() {
     ): SMangaUpdate {
         val dto = fetchMangaPage(manga.url)
         return SMangaUpdate(
-            manga = dto.manga.toSManga(),
+            manga = dto.manga.toSManga(currentTitle = manga.title),
             chapters = dto.chapters
                 .filterNot { it.isLocked }
                 .map { it.toSChapter(dto.manga.slug) }
                 .reversed(),
         )
+    }
+
+    override val supportsRelatedMangas get() = true
+
+    // Only the relations that exist on the site (href != null) are returned.
+    override suspend fun fetchRelatedMangaList(manga: SManga): List<SManga> {
+        val id = fetchMangaPage(manga.url).manga.databaseId ?: return emptyList()
+        return client.get("$baseUrl/api/manga-extras/$id").parseAs<ExtrasDto>().relations.mapNotNull { it.toSMangaOrNull() }
     }
 
     override fun getMangaUrl(manga: SManga) = "$baseUrl/manga/${manga.url}"
@@ -93,7 +116,14 @@ abstract class Aniverse : KeiSource() {
     }
 
     override fun getFilterList(data: JsonElement?) = FilterList(
-        Filter.Header("Le filtre de genre est ignoré lors d'une recherche textuelle."),
+        SortFilter(),
+        KindFilter(),
+        FormatFilter(),
+        StatusFilter(),
         GenreFilter(),
+        Filter.Separator(),
+        YearFilter(),
+        MinRatingFilter(),
+        MaxRatingFilter(),
     )
 }
