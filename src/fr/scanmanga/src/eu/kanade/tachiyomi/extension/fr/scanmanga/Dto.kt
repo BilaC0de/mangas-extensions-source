@@ -40,6 +40,12 @@ class LelRequestDto(
 )
 
 @Serializable
+class FingerprintDto(
+    private val gpu: String,
+    private val connection: String,
+)
+
+@Serializable
 class MangaSearchDto(
     val title: List<MangaItemDto>?,
 )
