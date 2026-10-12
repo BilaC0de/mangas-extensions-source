@@ -3,7 +3,6 @@ import hashlib
 import html
 import json
 import math
-import re
 import sys
 import time
 from pathlib import Path
@@ -56,7 +55,7 @@ updated_release_assets = {
 
 # Build index entries for the freshly built apks. Each extension's metadata comes from the
 # source-info JSON emitted by its assembleRelease task (see GenerateSourceInfoTask); its APK is a
-# sibling in the same build dir.
+# sibling in the same build dir. aapt reads the icon out of the APK
 new_extensions: list[tuple[index_pb2.Extension, Path, Path, bool, bool]] = []
 
 SOURCE_DIR = Path(__file__).resolve().parents[2]
@@ -191,7 +190,7 @@ final_extensions.sort(key=lambda ext: ext.packageName)
 
 index = index_pb2.Index(
     name="BilaC0de Manga Extensions",
-    badgeLabel="BILA",
+    badgeLabel="BilaC0de",
     signingKey="51ea36e99556abf7604010ac4e9a8162159a9b8b2e8b02d0fd54446f726d6bc2",
     contact=index_pb2.Contact(
         website="https://github.com/BilaC0de/extensions-manga",
@@ -217,57 +216,13 @@ with release_assets_path.open("w", encoding="utf-8") as f:
 
 with REPO_DIR.joinpath("index.html").open("w", encoding="utf-8") as f:
     f.write(
-        '<!DOCTYPE html>\n<html>\n<head>\n<meta charset="UTF-8">\n<title>BilaC0de Manga Extensions</title>\n</head>\n<body>\n<pre>\n'
+        '<!DOCTYPE html>\n<html>\n<head>\n<meta charset="UTF-8">\n<title>apks</title>\n</head>\n<body>\n<pre>\n'
     )
     for ext in final_extensions:
         apk_escaped = html.escape(ext.resources.apkUrl)
         name_escaped = html.escape(f"Tachiyomi: {ext.name}")
         f.write(f'<a href="{apk_escaped}">{name_escaped}</a>\n')
     f.write("</pre>\n</body>\n</html>\n")
-
-# --- Legacy index.min.json, kept for backwards compatibility with older app versions ---
-LANGUAGE_REGEX = re.compile(r"tachiyomi-([^.]+)")
-
-
-def get_legacy_lang(ext) -> str:
-    apk_filename = ext.resources.apkUrl.split("/")[-1]
-    match = LANGUAGE_REGEX.search(apk_filename)
-    lang = match.group(1) if match else "other"
-    if len(ext.sources) == 1:
-        source_language = ext.sources[0].language
-        if (
-            source_language != lang
-            and source_language not in {"all", "other"}
-            and lang not in {"all", "other"}
-        ):
-            lang = source_language
-    return lang
-
-
-legacy_json_index = [
-    {
-        "name": f"Tachiyomi: {ext.name}",
-        "pkg": ext.packageName,
-        "apk": ext.resources.apkUrl.split("/")[-1],
-        "lang": get_legacy_lang(ext),
-        "code": ext.versionCode,
-        "version": ext.versionName,
-        "nsfw": 1 if ext.contentWarning > 2 else 0,
-        "sources": [
-            {
-                "name": source.name,
-                "lang": source.language,
-                "id": str(source.id),
-                "baseUrl": source.homeUrl,
-            }
-            for source in ext.sources
-        ],
-    }
-    for ext in final_extensions
-]
-
-with REPO_DIR.joinpath("index.min.json").open("w", encoding="utf-8") as f:
-    json.dump(legacy_json_index, f, ensure_ascii=False, separators=(",", ":"))
 
 # --- Upload assets as release ---
 if not changed_extensions:
