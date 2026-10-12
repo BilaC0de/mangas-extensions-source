@@ -192,7 +192,7 @@ final_extensions.sort(key=lambda ext: ext.packageName)
 index = index_pb2.Index(
     name="BilaC0de Manga Extensions",
     badgeLabel="BILA",
-    signingKey="a0eda0489dc6b3e8580f8c55957597f0a2ddb238c12d4e315f6c15893d9b2611",
+    signingKey="51ea36e99556abf7604010ac4e9a8162159a9b8b2e8b02d0fd54446f726d6bc2",
     contact=index_pb2.Contact(
         website="https://github.com/BilaC0de/extensions-manga",
     ),
