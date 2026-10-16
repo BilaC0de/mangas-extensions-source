@@ -24,6 +24,7 @@ import keiyoushi.utils.booleanOrNull
 import keiyoushi.utils.firstInstanceOrNull
 import keiyoushi.utils.getPreferencesLazy
 import keiyoushi.utils.int
+import keiyoushi.utils.long
 import keiyoushi.utils.parseAs
 import keiyoushi.utils.runWebView
 import keiyoushi.utils.string
@@ -94,6 +95,21 @@ abstract class Comix :
         .rateLimit(5)
 
     private val baseUrlHost get() = baseUrl.toHttpUrl().host
+
+    // Comix blocks clients that page chapter lists faster than this
+    private class RequestPacer(private val intervalMs: Long) {
+        private var nextNanos = 0L
+
+        fun waitForSlot() {
+            val waitNanos = synchronized(this) {
+                val now = System.nanoTime()
+                val start = maxOf(now, nextNanos)
+                nextNanos = start + intervalMs * 1_000_000
+                start - now
+            }
+            if (waitNanos > 0) Thread.sleep(waitNanos / 1_000_000)
+        }
+    }
 
     // Retry failed images on alt hosts, like the site's reader
     private fun altHostFallback(chain: Interceptor.Chain): Response {
@@ -180,7 +196,7 @@ abstract class Comix :
         )
         val searchResponse = document.extractBrowseResponse() ?: runInWebView(
             document = document,
-            pageScript = { _, _ ->
+            pageScript = { _, _, _ ->
                 """
                 (function () {
                     const key = 'settings_v2';
@@ -442,21 +458,42 @@ abstract class Comix :
         val fetchUntilKnown = fetchChapters &&
             preferences.fetchChaptersUntilKnown() &&
             listMemo[CHAPTER_LIST_DEDUPLICATED_MEMO]?.booleanOrNull == deduplicateChapters &&
-            listMemo[CHAPTER_LIST_BLACKLIST_MEMO]?.string == blacklistSignature
-        val latestChapterId = chapters.firstOrNull()
-            ?.takeIf { fetchUntilKnown }
-            ?.chapterId()
+            listMemo[CHAPTER_LIST_BLACKLIST_MEMO]?.string == blacklistSignature &&
+            listMemo[CHAPTER_LIST_COMPLETE_MEMO]?.booleanOrNull != false
+        val knownIds = if (fetchUntilKnown) chapters.mapNotNull { it.chapterId() } else emptyList()
 
-        val updatedManga = if (fetchDetails) parseMangaDetails(getDocument()) else manga
-        val updatedChapters = if (fetchChapters) {
-            val fetched = getWebViewChapterList(manga, getDocument(), latestChapterId)
-            val candidates = if (fetchUntilKnown) fetched + chapters else fetched
+        val detail = if (fetchDetails || fetchUntilKnown) getDocument().mangaDetail() else null
+        val updatedManga = detail?.takeIf { fetchDetails }?.let(::parseMangaDetails) ?: manga
+        // Skip the chapter list when the site's last chapter upload is older than the last full read of it
+        val unchanged = fetchUntilKnown && run {
+            val fetchedAt = listMemo[CHAPTER_LIST_FETCHED_AT_MEMO]?.long ?: return@run false
+            val uploadedBy = detail?.chapterUpdatedAtFormatted?.let { parseRelativeDate(it, latest = true) } ?: 0L
+            uploadedBy in 1..fetchedAt
+        }
+        val updatedChapters = if (fetchChapters && !unchanged) {
+            // Site dates are relative ("2w ago"), so keep the date a chapter was first stored with
+            val knownDates = chapters.mapNotNull { chapter ->
+                chapter.chapterId()?.let { it to chapter.date_upload }?.takeIf { it.second > 0 }
+            }.toMap()
+            val mangaSlug = manga.url.removePrefix("/")
+            val fetchStartedAt = System.currentTimeMillis()
+            val chapterList = getWebViewChapterList(manga, getDocument(), knownIds)
+            if (!chapterList.complete && chapters.isEmpty()) {
+                throw Exception(chapterList.error ?: "Chapter list is incomplete")
+            }
+            val fetched = chapterList.chapters.map { it.toSChapter(mangaSlug) }.onEach { chapter ->
+                chapter.chapterId()?.let(knownDates::get)?.let { chapter.date_upload = it }
+            }
+            // An incomplete list keeps the stored chapters, and the next refresh walks the whole list again
+            val candidates = if (fetchUntilKnown || !chapterList.complete) fetched + chapters else fetched
             selectChapters(candidates, deduplicateChapters, scanlatorBlacklist).also { selected ->
                 selected.firstOrNull()?.apply {
                     memo = buildJsonObject {
-                        memo.forEach { (key, value) -> put(key, value) }
+                        memo.forEach { (key, value) -> if (key != CHAPTER_LIST_FETCHED_AT_MEMO) put(key, value) }
                         put(CHAPTER_LIST_DEDUPLICATED_MEMO, deduplicateChapters)
                         put(CHAPTER_LIST_BLACKLIST_MEMO, blacklistSignature)
+                        put(CHAPTER_LIST_COMPLETE_MEMO, chapterList.complete)
+                        if (chapterList.complete) put(CHAPTER_LIST_FETCHED_AT_MEMO, fetchStartedAt)
                     }
                 }
             }
@@ -466,20 +503,19 @@ abstract class Comix :
         return SMangaUpdate(updatedManga, updatedChapters)
     }
 
-    private fun parseMangaDetails(document: Document): SManga {
-        val detail = document.extractInitialQueries()
-            .entries.firstOrNull { (key, _) -> key.contains("\"detail\"") }
-            ?.value
-            ?: throw Exception("Could not find manga detail in queries")
+    private fun Document.mangaDetail(): Manga = extractInitialQueries()
+        .entries.firstOrNull { (key, _) -> key.contains("\"detail\"") }
+        ?.value
+        ?.parseAs<Manga>()
+        ?: throw Exception("Could not find manga detail in queries")
 
-        return detail.parseAs<Manga>().toSManga(
-            preferences.posterQuality(),
-            preferences.alternativeNamesInDescription(),
-            preferences.scorePosition(),
-            preferences.showExtraInfo(),
-            preferences.showTagsInGenres(),
-        )
-    }
+    private fun parseMangaDetails(detail: Manga): SManga = detail.toSManga(
+        preferences.posterQuality(),
+        preferences.alternativeNamesInDescription(),
+        preferences.scorePosition(),
+        preferences.showExtraInfo(),
+        preferences.showTagsInGenres(),
+    )
 
     override fun getMangaUrl(manga: SManga): String = "$baseUrl/title${manga.url}"
 
@@ -509,17 +545,15 @@ abstract class Comix :
     private suspend fun getWebViewChapterList(
         manga: SManga,
         document: Document,
-        latestChapterId: Int?,
-    ): List<SChapter> {
-        val mangaSlug = manga.url.removePrefix("/")
-        val chapterPath = JSONObject.quote("/title/${mangaSlug.substringBefore('-')}-")
-        val payload = runInWebView(document, { it.isChapterListRequest() }) { passPayloadName, rejectName ->
-            "(${asset("capture_items.js")})((${asset("chapter_list.js")})(" +
-                "${latestChapterId ?: "null"}, $chapterPath, $MAX_CHAPTER_PAGES, $CHAPTER_PAGE_DELAY_MS, " +
-                "window.$passPayloadName, window.$rejectName));"
+        knownIds: List<Int>,
+    ): ChapterList {
+        val mangaId = manga.url.removePrefix("/").substringBefore('-')
+        val payload = runInWebView(document, { it.isChapterListRequest() }) { passPayloadName, _, swipeName ->
+            "(${asset("chapter_list.js")})(${asset("site_api.js")}, " +
+                "${knownIds.joinToString(",", "[", "]")}, ${JSONObject.quote(mangaId)}, ${JSONObject.quote("/title/$mangaId-")}, " +
+                "$MAX_CHAPTER_PAGES, window.$swipeName, window.$passPayloadName);"
         }
-
-        return payload.parseAs<List<Chapter>>().map { it.toSChapter(mangaSlug) }
+        return payload.parseAs<ChapterList>()
     }
 
     private fun selectChapters(
@@ -596,9 +630,10 @@ abstract class Comix :
     }
 
     override suspend fun getPageList(chapter: SChapter): List<Page> {
+        val chapterId = chapter.chapterId() ?: throw Exception("Could not find the chapter id")
         val document = client.get(getChapterUrl(chapter)).asJsoup()
-        val payload = runInWebView(document, { it.isChapterPagesRequest() }) { passPayloadName, _ ->
-            "(${asset("capture_items.js")})((${asset("chapter_pages.js")})(window.$passPayloadName));"
+        val payload = runInWebView(document, { it.isChapterPagesRequest() }) { passPayloadName, rejectName, _ ->
+            "(${asset("chapter_pages.js")})(${asset("site_api.js")}, $chapterId, window.$passPayloadName, window.$rejectName);"
         }
 
         return buildPages(payload.parseAs())
@@ -627,16 +662,13 @@ abstract class Comix :
         document: Document,
         isDataRequest: ((HttpUrl) -> Boolean)? = null,
         buildScript: ((passPayloadName: String) -> String)? = null,
-        pageScript: (passPayloadName: String, rejectName: String) -> String,
+        pageScript: (passPayloadName: String, rejectName: String, swipeName: String) -> String,
     ): String {
         val waitSeconds = if (isDataRequest != null) DATA_REQUEST_WAIT_SECONDS else WEBVIEW_TIMEOUT_SECONDS
         val timeoutDeadline = AtomicLong(System.nanoTime() + waitSeconds.seconds.inWholeNanoseconds)
         val dataRequests = AtomicInteger()
-        val (bridgeName, errorBridgeName, passPayloadName, rejectName) = List(4) {
-            (1..(10..20).random())
-                .map { (('a'..'z') + ('A'..'Z')).random() }
-                .joinToString("")
-        }
+        val (bridgeName, errorBridgeName, passPayloadName, rejectName) = List(4) { randomName() }
+        val (swipeBridgeName, swipeName) = List(2) { randomName() }
         return runWebView(timeout = Duration.INFINITE) {
             userAgent = headers["User-Agent"].orEmpty()
             blockImages = true
@@ -646,7 +678,9 @@ abstract class Comix :
                 val requestUrl = request.url?.toString()?.toHttpUrlOrNull()
                     ?: return@interceptRequest emptyResponse
                 if (UNUSED_SITE_PATHS.any(requestUrl.encodedPath::startsWith)) return@interceptRequest emptyResponse
-                if (requestUrl.encodedPath == WAF_CHALLENGE_PATH) {
+                // The solver's own request for this path reads the site's page
+                val isFrameLoad = request.requestHeaders["Accept"].orEmpty().contains("text/html")
+                if (requestUrl.encodedPath == WAF_CHALLENGE_PATH && isFrameLoad) {
                     if (!preferences.solveCaptchas()) {
                         reject(Exception("Open in WebView to solve the captcha, or turn on \"Solve captchas\" in extension settings"))
                         return@interceptRequest emptyResponse
@@ -656,6 +690,7 @@ abstract class Comix :
                 }
                 val isData = isDataRequest?.invoke(requestUrl) == true
                 if (isData) dataRequests.incrementAndGet()
+                if (requestUrl.isChapterListRequest()) chapterListPacer.waitForSlot()
                 if (isData || requestUrl.encodedPath.startsWith(WAF_PATH)) {
                     timeoutDeadline.set(System.nanoTime() + waitSeconds.seconds.inWholeNanoseconds)
                 }
@@ -671,6 +706,11 @@ abstract class Comix :
 
             jsBridge(bridgeName) { resolve(it) }
             jsBridge(errorBridgeName) { reject(Exception(it)) }
+            webMessageBridge(swipeBridgeName, setOf(document.location().toHttpUrl().run { "$scheme://$host" })) { message ->
+                val points = message.split(',').mapNotNull { it.toFloatOrNull() }
+                if (points.size != 4) throw Exception("Bad swipe from the page: $message")
+                swipe(points[0], points[1], points[2], points[3])
+            }
 
             val captureScript = buildScript?.invoke(passPayloadName)
             if (captureScript != null) {
@@ -693,7 +733,8 @@ abstract class Comix :
             val bootstrapScript = """
                 window.$passPayloadName = payload => window.$bridgeName.post(payload);
                 window.$rejectName = message => window.$errorBridgeName.post(message);
-                ${pageScript(passPayloadName, rejectName)}
+                window.$swipeName = points => window.$swipeBridgeName.postMessage(points.join(","));
+                ${pageScript(passPayloadName, rejectName, swipeName)}
             """.trimIndent()
             val html = document.clone().apply {
                 head().prependElement("script").append(bootstrapScript)
@@ -701,6 +742,10 @@ abstract class Comix :
             loadData(document.location(), html)
         }
     }
+
+    private fun randomName() = (1..(10..20).random())
+        .map { (('a'..'z') + ('A'..'Z')).random() }
+        .joinToString("")
 
     private fun asset(name: String) = javaClass.getResource("/assets/$name")!!.readText()
 
@@ -900,7 +945,7 @@ abstract class Comix :
         private const val DATA_REQUEST_WAIT_SECONDS = 30L
         private const val SCRIPT_RETRY_INTERVAL_MS = 100L
         private const val MAX_CHAPTER_PAGES = 1000
-        private const val CHAPTER_PAGE_DELAY_MS = 500
+        private val chapterListPacer = RequestPacer(intervalMs = 2500)
         private const val OFFICIAL_GROUP_ID = 10702
         private const val TAG_ID_CACHE_SIZE = 50
         private val SCRAMBLE_PATH_FALLBACK_REGEX = Regex("/(?:i5|s?i+)/")
