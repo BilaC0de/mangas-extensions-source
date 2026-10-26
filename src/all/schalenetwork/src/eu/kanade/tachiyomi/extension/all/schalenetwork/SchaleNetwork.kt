@@ -38,7 +38,6 @@ abstract class SchaleNetwork :
     private val searchLang: String
         get() = when (lang) {
             "en" -> "english"
-            "ja" -> "japanese"
             "zh" -> "chinese"
             else -> ""
         }
@@ -259,12 +258,13 @@ abstract class SchaleNetwork :
 
         clearance?.takeIf { it != failedToken }?.also { return it }
 
-        if (failedToken == null) {
-            runCatching { getLocalStorage(baseUrl, "clearance") }.getOrNull()?.also {
+        // WebView may have obtained a newer clearance since the cached token failed.
+        runCatching { getLocalStorage(baseUrl, "clearance") }.getOrNull()
+            ?.takeIf { it != failedToken }
+            ?.also {
                 clearance = it
                 return@withLock it
             }
-        }
 
         val challenge = getTurnstileToken(
             url = baseUrl,
