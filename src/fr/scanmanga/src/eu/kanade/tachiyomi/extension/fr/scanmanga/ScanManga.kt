@@ -197,9 +197,9 @@ abstract class ScanManga :
 
     // URL search (e.g. pasting a manga link)
     override suspend fun getMangaByUrl(url: HttpUrl): SManga? {
-        if (url.topPrivateDomain() != domain) return null
+        if (url.topPrivateDomain() != domain || !MANGA_PATH_REGEX.matches(url.encodedPath)) return null
 
-        val mangaUrl = SManga.create().apply { setUrlWithoutDomain(url.toString()) }.url
+        val mangaUrl = url.encodedPath
         val manga = SManga.create().apply { this.url = mangaUrl }
 
         // fetchMangaUpdate() leaves `url` untouched, so restore it on the returned entity.
@@ -252,10 +252,17 @@ abstract class ScanManga :
                 ?.takeIf { it.isNotEmpty() }
         }
 
+        return SMangaUpdate(
+            manga = updatedManga,
+            chapters = if (fetchChapters) parseChapters(document) else chapters,
+        )
+    }
+
+    private fun parseChapters(document: Document): List<SChapter> {
         // The "Team" block (itemprop=translator) holds the scanlation team as a link next to it.
         val scanlatorTeam = document.selectFirst("div[itemprop=translator]")?.parent()?.selectFirst("a")?.text()
 
-        val newChapters = document.select("div.chapt_m").mapNotNull { element ->
+        return document.select("div.chapt_m").mapNotNull { element ->
             val linkEl = element.selectFirst("td.publimg span.i a") ?: return@mapNotNull null
             val extraTitle = element.selectFirst("td.publititle, td.publititle_ext")?.text()
 
@@ -279,14 +286,9 @@ abstract class ScanManga :
                 }
             }
         }
-
-        return SMangaUpdate(
-            manga = updatedManga,
-            chapters = newChapters,
-        )
     }
 
-    // Licensed chapters store their absolute (foreign) URL in chapter.url - see fetchMangaUpdate.
+    // Licensed chapters store their absolute (foreign) URL in chapter.url - see parseChapters.
     private fun SChapter.isLicensed() = url.startsWith("http")
 
     override fun getChapterUrl(chapter: SChapter): String = if (chapter.isLicensed()) chapter.url else super.getChapterUrl(chapter)
@@ -297,6 +299,9 @@ abstract class ScanManga :
             throw Exception("Ce chapitre est licencié.")
         }
 
+        // Must be computed before the first suspension point: afterwards the caller's frames
+        // are gone from the stack trace and this would always be false.
+        val isReader = Exception().stackTrace.any { it.className.contains("reader") }
         val chapterUrl = "$baseUrl${chapter.url}"
 
         // Cold session: CF won't issue cf_clearance to a session that never touched the host,
@@ -306,7 +311,7 @@ abstract class ScanManga :
                 warmupWebViewSession()
                 fetchChapterBody(chapterUrl)
             }
-            ?: solveChallengeInWebView(chapterUrl)
+            ?: solveChallengeInWebView(chapterUrl, isReader)
 
         return parsePageList(Jsoup.parse(body, chapterUrl))
     }
@@ -321,9 +326,8 @@ abstract class ScanManga :
         null
     }
 
-    private suspend fun solveChallengeInWebView(chapterUrl: String): String {
+    private suspend fun solveChallengeInWebView(chapterUrl: String, isReader: Boolean): String {
         val context = applicationContext
-        val isReader = Exception().stackTrace.any { it.className.contains("reader") }
 
         try {
             val intent = Intent().apply {
@@ -510,7 +514,7 @@ abstract class ScanManga :
             dialogTitle = "GPU Renderer"
             dialogMessage =
                 "Enter your GPU renderer exactly as shown by a site like https://www.browserleaks.com/webgl " +
-                "(open it in Google Chrome on Android), without any extra spaces or characters."
+                    "(open it in Google Chrome on Android), without any extra spaces or characters."
         }.also { screen.addPreference(it) }
     }
 
@@ -532,6 +536,7 @@ abstract class ScanManga :
         """.trimIndent()
 
         private val CHAPTER_PREFIX_REGEX = Regex("""^Ch\.\s*""")
+        private val MANGA_PATH_REGEX = Regex("""/\d+(?:-\d+)?/[^/]+\.html""")
         private const val PACKED_SCRIPT_SELECTOR = "script:containsData(const idc)"
         private val HUNTER_OBFUSCATION_REGEX = Regex(
             """eval\s*\(\s*(?:/\*[^*]*\*/\s*)?function\s*\(\s*l\s*,\s*y\s*,\s*d\s*,\s*m\s*,\s*e\s*,\s*r\s*\)\s*\{[\s\S]*?\}\s*\(\s*"([^"]+)"\s*,\s*\d+\s*,\s*"([^"]+)"\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*\d+\s*\)\s*\)""",

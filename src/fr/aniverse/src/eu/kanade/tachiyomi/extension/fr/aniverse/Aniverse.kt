@@ -8,6 +8,7 @@ import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
 import eu.kanade.tachiyomi.source.model.SMangaUpdate
 import keiyoushi.annotation.Source
+import keiyoushi.network.Fetch
 import keiyoushi.network.get
 import keiyoushi.network.rateLimit
 import keiyoushi.source.KeiSource
@@ -52,7 +53,7 @@ abstract class Aniverse : KeiSource() {
             addQueryParameter("page", page.toString())
             addQueryParameter("pageSize", "32")
         }.build()
-        val dto = client.get(url).parseAs<SearchResultDto>()
+        val dto = client.get(url, Fetch.XHR).parseAs<SearchResultDto>()
         return MangasPage(dto.data.map { it.toSManga() }, dto.hasNextPage)
     }
 
@@ -60,7 +61,7 @@ abstract class Aniverse : KeiSource() {
         val url = "$baseUrl/api/manga".toHttpUrl().newBuilder()
             .addQueryParameter("page", page.toString())
             .build()
-        val dto = client.get(url).parseAs<MangaListDto>()
+        val dto = client.get(url, Fetch.XHR).parseAs<MangaListDto>()
         return MangasPage(dto.items.map { it.toSManga() }, dto.hasNextPage)
     }
 
@@ -85,12 +86,12 @@ abstract class Aniverse : KeiSource() {
     // Only the relations that exist on the site (href != null) are returned.
     override suspend fun fetchRelatedMangaList(manga: SManga): List<SManga> {
         val id = fetchMangaPage(manga.url).manga.databaseId ?: return emptyList()
-        return client.get("$baseUrl/api/manga-extras/$id").parseAs<ExtrasDto>().relations.mapNotNull { it.toSMangaOrNull() }
+        return client.get("$baseUrl/api/manga-extras/$id", Fetch.XHR).parseAs<ExtrasDto>().relations.mapNotNull { it.toSMangaOrNull() }
     }
 
     override fun getMangaUrl(manga: SManga) = "$baseUrl/manga/${manga.url}"
 
-    private suspend fun fetchMangaPage(slug: String): MangaPageDto = client.get("$baseUrl/manga/$slug").extractNextJs<MangaPageDto>()
+    private suspend fun fetchMangaPage(slug: String): MangaPageDto = client.get("$baseUrl/manga/$slug", Fetch.XHR).extractNextJs<MangaPageDto>()
         ?: throw Exception("Impossible d'extraire les données du manga")
 
     override suspend fun getMangaByUrl(url: HttpUrl): SManga? {
@@ -101,7 +102,7 @@ abstract class Aniverse : KeiSource() {
     }
 
     override suspend fun getPageList(chapter: SChapter): List<Page> {
-        val response = client.get(getChapterUrl(chapter))
+        val response = client.get(getChapterUrl(chapter), Fetch.DOCUMENT)
         // Locked chapters redirect to the sign-in page.
         if (response.request.url.encodedPath.startsWith("/sign-in")) {
             response.close()
