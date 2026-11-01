@@ -4,7 +4,8 @@ from datetime import UTC, datetime, timedelta
 
 from github_utils import REPO_NAME, run_gh
 
-SOURCE_REPO = "keiyoushi/extensions-source"
+SOURCE_REPO = "BilaC0de/mangas-extensions-source"
+REPO_BRANCH = "repo-manga"
 PUBLISH_WORKFLOW = "build_push.yml"
 PUBLISH_JOB = "Publish extension repo"
 MIN_PUBLISH_AGE = timedelta(hours=1)
@@ -85,7 +86,7 @@ def get_referenced_assets() -> set[str]:
             "api",
             "--header",
             "Accept: application/vnd.github.raw+json",
-            f"repos/{REPO_NAME}/contents/index.json?ref=repo",
+            f"repos/{REPO_NAME}/contents/index.json?ref={REPO_BRANCH}",
         )
     )
     return {

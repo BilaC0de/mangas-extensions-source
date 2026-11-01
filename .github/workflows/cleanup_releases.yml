@@ -1,8 +1,9 @@
 name: Clean up releases
 
 on:
-  schedule:
-    - cron: "30 3 * * *"
+  push:
+    branches:
+      - dev
   workflow_dispatch:
 
 permissions:
@@ -15,13 +16,14 @@ concurrency:
 jobs:
   cleanup:
     name: Remove unreferenced release assets
-    if: github.repository == 'keiyoushi/extensions-source'
+    if: github.repository == 'BilaC0de/mangas-extensions-source'
     runs-on: ubuntu-latest
     timeout-minutes: 240
     steps:
-      - name: Checkout main branch
+      - name: Checkout dev branch
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: dev
           persist-credentials: false
 
       - name: Clean up releases
