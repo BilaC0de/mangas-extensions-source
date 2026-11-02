@@ -12,6 +12,7 @@ import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
 import eu.kanade.tachiyomi.source.model.SMangaUpdate
 import keiyoushi.annotation.Source
+import keiyoushi.network.Fetch
 import keiyoushi.network.get
 import keiyoushi.network.post
 import keiyoushi.source.KeiSource
@@ -33,13 +34,11 @@ import javax.crypto.spec.SecretKeySpec
 @Source
 abstract class Crunchyscan : KeiSource() {
 
-    // name, lang, baseUrl, id injectés automatiquement par KSP via le bloc source {}
-
     private var csrfToken: String = ""
 
     private suspend fun fetchCsrfToken(): String {
         if (csrfToken.isNotEmpty()) return csrfToken
-        val document = client.get(baseUrl, headers).asJsoup()
+        val document = client.get(baseUrl, Fetch.DOCUMENT).asJsoup()
         csrfToken = document.selectFirst("meta[name=csrf-token]")?.attr("content") ?: ""
         return csrfToken
     }
@@ -62,7 +61,7 @@ abstract class Crunchyscan : KeiSource() {
             FormBody.Builder().add("affichage", "grid").add("team", "").add("artist", "").add("author", "").add("page", page.toString())
                 .add("chapters[]", "0").add("chapters[]", "200").add("searchTerm", "").add("orderWith", "Vues").add("orderBy", "desc")
                 .build()
-        val response = client.post("$baseUrl/api/manga/search/advance", headersWithCsrf(), formBody)
+        val response = client.post("$baseUrl/api/manga/search/advance", headersWithCsrf(), Fetch.XHR, formBody)
         return parseMangasPage(response)
     }
 
@@ -75,7 +74,7 @@ abstract class Crunchyscan : KeiSource() {
             FormBody.Builder().add("affichage", "grid").add("team", "").add("artist", "").add("author", "").add("page", page.toString())
                 .add("chapters[]", "0").add("chapters[]", "200").add("searchTerm", "").add("orderWith", "Récent").add("orderBy", "desc")
                 .build()
-        val response = client.post("$baseUrl/api/manga/search/advance", headersWithCsrf(), formBody)
+        val response = client.post("$baseUrl/api/manga/search/advance", headersWithCsrf(), Fetch.XHR, formBody)
         return parseMangasPage(response)
     }
 
@@ -121,7 +120,7 @@ abstract class Crunchyscan : KeiSource() {
 
         formBody.add("chapters[]", chaptersMin).add("chapters[]", chaptersMax)
 
-        val response = client.post("$baseUrl/api/manga/search/advance", headersWithCsrf(), formBody.build())
+        val response = client.post("$baseUrl/api/manga/search/advance", headersWithCsrf(), Fetch.XHR, formBody.build())
         return parseMangasPage(response)
     }
 
@@ -136,7 +135,7 @@ abstract class Crunchyscan : KeiSource() {
         fetchDetails: Boolean,
         fetchChapters: Boolean,
     ): SMangaUpdate {
-        val document = client.get(baseUrl + manga.url, headers).asJsoup()
+        val document = client.get(baseUrl + manga.url, Fetch.DOCUMENT).asJsoup()
 
         return SMangaUpdate(
             manga = parseMangaDetails(document, manga),
@@ -198,7 +197,7 @@ abstract class Crunchyscan : KeiSource() {
         // elle ne fonctionne plus de manière fiable pendant un téléchargement.
         val isDownload = isDownloadContext()
 
-        val response = client.get(baseUrl + chapter.url, headers)
+        val response = client.get(baseUrl + chapter.url, Fetch.DOCUMENT)
         val chapterUrl = response.request.url.toString().substringBefore("?")
         val document = response.asJsoup()
 
@@ -249,7 +248,7 @@ abstract class Crunchyscan : KeiSource() {
 
     // getImageUrl fusionne l'ancien imageUrlRequest (avec son CacheControl.FORCE_NETWORK) + imageUrlParse
     override suspend fun getImageUrl(page: Page): String {
-        val response = client.get(page.url, headers, cacheControl = CacheControl.FORCE_NETWORK)
+        val response = client.get(page.url, Fetch.DOCUMENT, cacheControl = CacheControl.FORCE_NETWORK)
         val targetIndex = response.request.url.queryParameter("imgIndex")?.toIntOrNull() ?: 0
         val document = response.asJsoup()
         val dataMeta = document.selectFirst("#a-ads-id")?.attr("data-meta") ?: return ""
@@ -259,8 +258,7 @@ abstract class Crunchyscan : KeiSource() {
         return if (url.contains("/get-image")) "$url&cid=$FINGERPRINT_DEFAULT" else url
     }
 
-    // Fonction non-suspend, toujours disponible telle quelle sur KeiSource
-    override fun imageRequest(page: Page): Request {
+    override fun getImageRequest(page: Page): Request {
         val imageUrl = page.imageUrl.orEmpty().replace("&amp;", "&")
 
         val referer = if (imageUrl.contains("/get-image") && page.url.isNotEmpty()) {
