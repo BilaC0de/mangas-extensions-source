@@ -13,6 +13,7 @@ import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
 import eu.kanade.tachiyomi.source.model.SMangaUpdate
 import keiyoushi.annotation.Source
+import keiyoushi.network.Fetch
 import keiyoushi.network.get
 import keiyoushi.network.post
 import keiyoushi.source.KeiSource
@@ -101,7 +102,7 @@ abstract class ScanManga :
             .build()
         val requestBody = TopRequest(offset, TOP_PAGE_SIZE, "").toJsonRequestBody()
 
-        val fragment = client.post("https://bqj.$domain/top.json", topHeaders, requestBody)
+        val fragment = client.post("https://bqj.$domain/top.json", topHeaders, Fetch.XHR, requestBody)
             .use { it.body.string().trim() }
 
         val document = Jsoup.parseBodyFragment(fragment, siteUrl)
@@ -147,7 +148,7 @@ abstract class ScanManga :
 
     // Latest
     override suspend fun getLatestUpdates(page: Int): MangasPage {
-        val document = client.get(baseUrl).asJsoup()
+        val document = client.get(baseUrl, Fetch.DOCUMENT).asJsoup()
 
         val mangas = document.select("#content_news .publi").mapNotNull { element ->
             val mangaElement = element.selectFirst("a.l_manga") ?: return@mapNotNull null
@@ -177,7 +178,7 @@ abstract class ScanManga :
             .set("Content-Type", "application/json; charset=UTF-8")
             .build()
 
-        val json = client.get(url, searchHeaders).use { it.body.string().trim() }
+        val json = client.get(url, searchHeaders, Fetch.XHR).use { it.body.string().trim() }
 
         // The API answers with a bare array when nothing matches, which isn't the DTO shape.
         if (json.isEmpty() || json == "[]") {
@@ -216,7 +217,7 @@ abstract class ScanManga :
         fetchDetails: Boolean,
         fetchChapters: Boolean,
     ): SMangaUpdate {
-        val document = client.get("$baseUrl${manga.url}").asJsoup()
+        val document = client.get("$baseUrl${manga.url}", Fetch.DOCUMENT).asJsoup()
 
         val updatedManga = SManga.create().apply {
             // itemprop may hold several values ("name headline"), so match on presence only; the
@@ -317,7 +318,7 @@ abstract class ScanManga :
     }
 
     private suspend fun fetchChapterBody(chapterUrl: String): String? = try {
-        readerClient.get(chapterUrl, headers, ensureSuccess = false).use { resp ->
+        readerClient.get(chapterUrl, headers, Fetch.DOCUMENT, ensureSuccess = false).use { resp ->
             resp.body.string().takeIf { CHAPTER_INFO_REGEX.containsMatchIn(it) }
         }
     } catch (e: CancellationException) {
@@ -398,7 +399,7 @@ abstract class ScanManga :
             .toRequestBody(LEL_MEDIA_TYPE)
         val requestHeaders = buildLelHeaders(document.baseUri().toHttpUrl())
 
-        val payload = noCookieClient.post("https://bqj.$domain/lel/$chapterId.json", requestHeaders, requestBody)
+        val payload = noCookieClient.post("https://bqj.$domain/lel/$chapterId.json", requestHeaders, Fetch.XHR, requestBody)
             .use { dataAPI(it.body.string(), chapterId.toInt()) }
 
         return payload.generateImageUrls().map { Page(it.first, imageUrl = it.second) }
@@ -514,7 +515,7 @@ abstract class ScanManga :
             dialogTitle = "GPU Renderer"
             dialogMessage =
                 "Enter your GPU renderer exactly as shown by a site like https://www.browserleaks.com/webgl " +
-                    "(open it in Google Chrome on Android), without any extra spaces or characters."
+                "(open it in Google Chrome on Android), without any extra spaces or characters."
         }.also { screen.addPreference(it) }
     }
 
