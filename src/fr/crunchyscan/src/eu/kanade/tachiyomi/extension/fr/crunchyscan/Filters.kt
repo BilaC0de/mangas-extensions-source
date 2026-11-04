@@ -1,31 +1,101 @@
 package eu.kanade.tachiyomi.extension.fr.crunchyscan
 
 import eu.kanade.tachiyomi.source.model.Filter
+import okhttp3.HttpUrl
 
-class Genre(name: String) : Filter.TriState(name)
-class Year(name: String) : Filter.CheckBox(name)
-class Status(name: String) : Filter.CheckBox(name)
-class Type(name: String) : Filter.CheckBox(name)
+interface UrlFilter {
+    fun addToUrl(url: HttpUrl.Builder)
+}
 
-class GenreFilter : Filter.Group<Genre>("Genres", GENRES.map(::Genre))
-class YearFilter : Filter.Group<Year>("Années", YEARS.map(::Year))
-class StatusFilter : Filter.Group<Status>("Statuts", STATUSES.map(::Status))
-class TypeFilter : Filter.Group<Type>("Types", TYPES.map(::Type))
+class SortFilter :
+    Filter.Select<String>("Trier par", SORTS.map { it.first }.toTypedArray(), 2),
+    UrlFilter {
+    override fun addToUrl(url: HttpUrl.Builder) {
+        url.addQueryParameter("sort", SORTS[state].second)
+    }
+}
 
-class ChapterMinFilter : Filter.Text("Chapitres (min)", "0")
-class ChapterMaxFilter : Filter.Text("Chapitres (max)", "200")
+class StatusFilter :
+    Filter.Select<String>("Statut", STATUSES.map { it.first }.toTypedArray()),
+    UrlFilter {
+    override fun addToUrl(url: HttpUrl.Builder) {
+        STATUSES[state].second?.let { url.addQueryParameter("status", it) }
+    }
+}
 
-private val GENRES = listOf(
-    "Action", "Amour", "Aventure", "Arts Martiaux", "Combats", "Comédie", "Démons", "Drame",
-    "Fantastique", "Historique", "Guerre", "Horreur", "Isekai", "Magie", "Mechas", "Militaire",
-    "Monstres", "Mystère", "Mature", "Post Apocalyptique", "Psychologique", "Réincarnation",
-    "Romance", "Science Fiction", "Sport", "Surnaturel", "Thriller", "Tranche De Vie",
-    "Vie Scolaire", "Piccoma", "Delitoon", "Toomics", "Webtoon", "Tappytoon", "Harem", "Ono",
-    "BL", "Oneshot", "Yuri", "Adulte", "Pocket Comics", "Pornhwa", "Mangadon", "HoneyToon",
+class Option(name: String, val value: String) : Filter.CheckBox(name)
+
+open class CheckBoxGroupFilter(name: String, private val param: String, values: List<String>) :
+    Filter.Group<Option>(name, values.map { Option(it, it) }),
+    UrlFilter {
+    override fun addToUrl(url: HttpUrl.Builder) {
+        state.filter { it.state }.forEach { url.addQueryParameter(param, it.value) }
+    }
+}
+
+class TypeFilter : CheckBoxGroupFilter("Type", "type", TYPES)
+
+class GenreFilter : CheckBoxGroupFilter("Genres", "genre", GENRES)
+
+private val SORTS = listOf(
+    "Tendance" to "tendance",
+    "Nouveautés" to "nouveautes",
+    "Populaire" to "populaire",
+    "Note" to "note",
+    "A-Z" to "az",
 )
 
-private val YEARS = (2025 downTo 1987).map { it.toString() }
+private val STATUSES = listOf(
+    "Tous" to null,
+    "En cours" to "En Cours",
+    "Terminé" to "Terminé",
+    "En pause" to "En Pause",
+    "Abandonné" to "Abandonné",
+)
 
-private val STATUSES = listOf("En cours", "Terminé", "Abandonné")
+private val TYPES = listOf(
+    "Manga",
+    "Manhwa",
+    "Manhua",
+    "Comics",
+    "BD",
+    "Global-Manga",
+    "Novel",
+    "Artbook",
+    "Guidebook",
+    "Anime-Comics",
+    "Fanfiction",
+)
 
-private val TYPES = listOf("Manga", "Manhwa", "Manhua", "Bande Dessinée")
+private val GENRES = listOf(
+    "Fantastique",
+    "Action",
+    "Aventure",
+    "Drame",
+    "Romance",
+    "Comédie",
+    "Science-Fiction",
+    "Slice of Life",
+    "Fantasy",
+    "School-Life",
+    "Surnaturel",
+    "Historique",
+    "Mystère",
+    "Thriller",
+    "Horreur",
+    "Psychologique",
+    "Mature",
+    "Tragique",
+    "Ecchi",
+    "Histoires courtes",
+    "Polar",
+    "Erotique",
+    "Sport",
+    "Biographique",
+    "Shônen-aï",
+    "Shôjo-aï",
+    "Isekai",
+    "Nekketsu",
+    "Documentaire",
+    "Yonkoma",
+)

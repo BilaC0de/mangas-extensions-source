@@ -1,33 +1,38 @@
 package eu.kanade.tachiyomi.extension.fr.crunchyscan
 
-import eu.kanade.tachiyomi.source.model.SManga
+import keiyoushi.utils.stringOrNull
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonPrimitive
 
 @Serializable
-class ApiResponse(
-    val data: List<MangaItem>,
-    val meta: Meta,
-)
-
-@Serializable
-class MangaItem(
-    private val name: String,
-    private val slug: String,
-    @SerialName("cover_url") private val coverUrl: String? = null,
+class LdJsonDto(
+    @SerialName("@graph") private val graph: List<LdNodeDto>,
 ) {
-    fun toSManga() = SManga.create().apply {
-        title = name
-        url = "/lecture-en-ligne/$slug"
-        // Le site renvoie parfois cover_url en http://, ce qui déclenche un challenge
-        // Cloudflare (403) car le domaine force le HTTPS - on force donc le schéma ici.
-        thumbnail_url = coverUrl?.replaceFirst("http://", "https://")
-        initialized = false
-    }
+    val series get() = graph.firstOrNull { it.id?.endsWith("#book") == true }
 }
 
 @Serializable
-class Meta(
-    @SerialName("current_page") val currentPage: Int,
-    @SerialName("last_page") val lastPage: Int,
-)
+class LdNodeDto(
+    @SerialName("@id") val id: String? = null,
+    val description: String? = null,
+    private val genre: JsonElement? = null,
+) {
+    val genres
+        get() = when (genre) {
+            is JsonArray -> genre.mapNotNull { it.stringOrNull }
+            is JsonPrimitive -> listOfNotNull(genre.stringOrNull)
+            else -> emptyList()
+        }
+}
+
+@Serializable
+class ReaderHistoryDto(val pages: Int)
+
+@Serializable
+class VerifyRequestDto(private val token: String)
+
+@Serializable
+class VerifyResponseDto(val ok: Boolean)
