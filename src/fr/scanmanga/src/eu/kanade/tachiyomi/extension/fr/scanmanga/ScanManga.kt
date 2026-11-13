@@ -13,27 +13,24 @@ import keiyoushi.annotation.Source
 import keiyoushi.network.Fetch
 import keiyoushi.network.get
 import keiyoushi.source.KeiSource
-import keiyoushi.utils.JSON_MEDIA_TYPE
 import keiyoushi.utils.applicationContext
 import keiyoushi.utils.asJsoup
 import keiyoushi.utils.inflate
 import keiyoushi.utils.ownTextOrNull
 import keiyoushi.utils.parseAs
 import keiyoushi.utils.runWebView
-import kotlinx.coroutines.Dispatchers
+import keiyoushi.utils.toJsonString
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
-import kotlinx.coroutines.withContext
 import okhttp3.Headers
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.Interceptor
 import okhttp3.OkHttpClient
-import okhttp3.Protocol
 import okhttp3.Request
-import okhttp3.RequestBody.Companion.toRequestBody
 import org.jsoup.nodes.Document
+import java.io.IOException
 import kotlin.time.Duration.Companion.seconds
 import kotlin.time.TimeSource
 
@@ -53,15 +50,15 @@ abstract class ScanManga : KeiSource() {
         }
     }
 
-    override fun OkHttpClient.Builder.configureClient(): OkHttpClient.Builder = addNetworkInterceptor(stripEmptyXRequestedWith)
-
-    // The page list call goes through a plain OkHttp client: through the host app's client (its interceptors,
-    // DoH, DNS) the server answers 200 with an empty body. No cookies, as in the site's own reader.
-    private val lelClient: OkHttpClient by lazy {
-        OkHttpClient.Builder()
-            .protocols(listOf(Protocol.HTTP_1_1))
-            .build()
+    // A refused page image redirects to a valid placeholder PNG, which would otherwise be shown and downloaded as the page
+    private val rejectPlaceholder = Interceptor { chain ->
+        chain.proceed(chain.request()).also {
+            if ("/lelsec" in it.request.url.encodedPath) it.use { throw IOException("Le site a refusé l'image de cette page.") }
+        }
     }
+
+    override fun OkHttpClient.Builder.configureClient(): OkHttpClient.Builder = addNetworkInterceptor(stripEmptyXRequestedWith)
+        .addInterceptor(rejectPlaceholder)
 
     override fun Headers.Builder.configureHeaders(): Headers.Builder = add("accept-language", "fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7")
         .add("X-Requested-With", "")
@@ -194,11 +191,6 @@ abstract class ScanManga : KeiSource() {
     private val multipleSpaces = Regex("""\s+""")
 
     private fun dataAPI(data: String, idc: Int): UrlPayload {
-        // The server answers 200 with an empty body when it rejects the request
-        if (data.isBlank()) {
-            error("Réponse vide de l'API des pages : requête refusée par le site.")
-        }
-
         if (data.contains("error")) {
             error("Received error response from data API: ${multipleSpaces.replace(data, " ").trim()}")
         }
@@ -211,58 +203,25 @@ abstract class ScanManga : KeiSource() {
         return String(Base64.decode(reversed, Base64.DEFAULT)).parseAs<UrlPayload>()
     }
 
-    // The site's script fills the "d" field of the request with a fingerprint of the page, joined by "|"
-    // (index 3 is the start of the User-Agent's SHA-256). Computed inside our WebView, fields 0, 1 and 4 differ from
-    // a regular browser and the server answers 200 with an empty body. A regular browser always sends these values,
-    // so they are put back; fields 2 and 3 are left as captured.
-    private val fingerprintRegex = Regex(""""d":"([^"]*)"""")
-
-    private fun cleanLelBody(body: String): String = fingerprintRegex.replace(body) { match ->
-        val parts = match.groupValues[1].split("|").toMutableList()
-        if (parts.size == 5) {
-            parts[0] = "e3b0c44298fc"
-            parts[1] = "4e1e940bfae6"
-            parts[4] = "f56ebc75c021"
-        }
-        """"d":"${parts.joinToString("|")}""""
-    }
-
     override suspend fun getPageList(chapter: SChapter): List<Page> {
         val chapterUrl = getChapterUrl(chapter)
         val chapterId = chapterUrl.substringAfterLast('_').substringBefore('.').toInt()
         val lelCall = captureLelCall(chapterUrl, chapterId)
             ?: throw Exception("Challenge Cloudflare. Résolvez-le dans la WebView, fermez-la et réessayez.")
 
-        // Sent from the app: from the chapter page this call needs a CORS preflight, which fails in a WebView.
-        // The headers a browser adds itself to a cross-origin fetch are added back: the server refuses a call without Origin.
-        // Host goes first, as in a browser: OkHttp appends it last by default, and the server refuses that order.
-        val lelHeaders = Headers.Builder()
-            .add("Host", lelCall.url.toHttpUrl().host)
-            .addAll(headers)
-            .apply { lelCall.headers.forEach { (name, value) -> set(name, value) } }
-            .set("Accept-Encoding", "identity")
-            .removeAll("X-Requested-With")
-            .set("Accept", "*/*")
-            .set("Origin", baseUrl.trimEnd('/'))
-            .set("Sec-Fetch-Dest", "empty")
-            .set("Sec-Fetch-Mode", "cors")
-            .set("Sec-Fetch-Site", "same-site")
-            .build()
-
-        val request = Request.Builder()
-            .url(lelCall.url)
-            .headers(lelHeaders)
-            .post(cleanLelBody(lelCall.body).toRequestBody(JSON_MEDIA_TYPE))
-            .build()
-
-        val raw = withContext(Dispatchers.IO) {
-            lelClient.newCall(request).execute().use { it.body.string() }
-        }
-
-        return dataAPI(raw, chapterId)
+        return dataAPI(sendLelCall(lelCall), chapterId)
             .generateImageUrls()
-            .map { Page(it.first, imageUrl = it.second) }
+            .map { Page(it.first, url = chapterUrl, imageUrl = it.second) }
     }
+
+    // The image host answers with a placeholder unless the Referer is the chapter page in full, as the reader sends it.
+    // Page lists cached before this have no url.
+    override fun getImageRequest(page: Page): Request = super.getImageRequest(page).run {
+        if (page.url.isEmpty()) this else newBuilder().header("Referer", page.url).build()
+    }
+
+    // The site answers app WebViews with a fake 404 on every request carrying their default value
+    private val siteOrigins get() = setOf("https://*.$domain")
 
     private val webViewMutex = Mutex()
 
@@ -287,19 +246,17 @@ abstract class ScanManga : KeiSource() {
      */
     private suspend fun readLelCall(chapterUrl: String, chapterId: Int): LelCall? {
         val bridge = List(16) { ('a'..'z').random() }.joinToString("")
-        val origins = setOf("https://*.$domain")
 
         return runWebView<LelCall?>(45.seconds) {
             userAgent = headers["User-Agent"]!!
             blockImages = true
-            // The site answers app WebViews with a fake 404 on every request carrying their default value
-            setOriginMatchedHeader("X-Requested-With", "", origins)
-            webMessageBridge(bridge, origins) { message ->
+            setOriginMatchedHeader("X-Requested-With", "", siteOrigins)
+            webMessageBridge(bridge, siteOrigins) { message ->
                 val lelCall = message.parseAs<LelCall>()
                 // Third-party scripts share this page and can call the hook too
                 if (lelCall.url.toHttpUrlOrNull()?.topPrivateDomain() == domain) resolve(lelCall)
             }
-            injectAtDocumentStart(lelHook(bridge, chapterId), origins)
+            injectAtDocumentStart(lelHook(bridge, chapterId), siteOrigins)
             onReceivedError { request, error ->
                 if (request.isForMainFrame) reject(Exception(error.description.toString()))
             }
@@ -327,6 +284,37 @@ abstract class ScanManga : KeiSource() {
             };
         })();
     """.trimIndent()
+
+    /**
+     * Sends the captured call from a page on the API's origin, where it needs no CORS preflight. The API refuses the call
+     * from the app (HTTP 500, empty body) and the preflight from the chapter page, which WebView sends with its own
+     * X-Requested-With. The call itself needs `X-Requested-With: XMLHttpRequest`: any other value gets a 404.
+     */
+    private suspend fun sendLelCall(lelCall: LelCall): String {
+        val bridge = List(16) { ('a'..'z').random() }.joinToString("")
+        val apiOrigin = lelCall.url.toHttpUrl().run { "$scheme://$host" }
+
+        return runWebView(30.seconds) {
+            userAgent = headers["User-Agent"]!!
+            webMessageBridge(bridge, setOf(apiOrigin)) { message ->
+                val reply = message.parseAs<LelReply>()
+                if (reply.status == 200) resolve(reply.body) else reject(Exception("La liste des pages a été refusée (HTTP ${reply.status})."))
+            }
+            // The API answers HTTP 500 to calls carrying cookies
+            onPageFinished {
+                evaluateJs(
+                    """
+                    ((call) => fetch(call.url, { method: "POST", headers: { ...call.headers, "X-Requested-With": "XMLHttpRequest" }, body: call.body, credentials: "omit" })
+                        .then((response) => response.text().then((body) => ({ status: response.status, body })))
+                        .catch((error) => ({ status: 0, body: String(error) }))
+                        .then((reply) => window.$bridge.postMessage(JSON.stringify(reply))))(${lelCall.toJsonString()})
+                    """.trimIndent(),
+                )
+            }
+            // Any page works, the root is a bare 403
+            loadUrl("$apiOrigin/")
+        }
+    }
 
     private fun openChallengeWebView(chapterUrl: String) {
         val intent = Intent().apply {
