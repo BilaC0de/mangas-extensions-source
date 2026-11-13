@@ -12,7 +12,6 @@ import eu.kanade.tachiyomi.source.model.SMangaUpdate
 import keiyoushi.annotation.Source
 import keiyoushi.network.Fetch
 import keiyoushi.network.get
-import keiyoushi.network.post
 import keiyoushi.source.KeiSource
 import keiyoushi.utils.JSON_MEDIA_TYPE
 import keiyoushi.utils.applicationContext
@@ -21,15 +20,18 @@ import keiyoushi.utils.inflate
 import keiyoushi.utils.ownTextOrNull
 import keiyoushi.utils.parseAs
 import keiyoushi.utils.runWebView
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
-import okhttp3.CookieJar
+import kotlinx.coroutines.withContext
 import okhttp3.Headers
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.Interceptor
 import okhttp3.OkHttpClient
+import okhttp3.Protocol
+import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.jsoup.nodes.Document
 import kotlin.time.Duration.Companion.seconds
@@ -53,12 +55,11 @@ abstract class ScanManga : KeiSource() {
 
     override fun OkHttpClient.Builder.configureClient(): OkHttpClient.Builder = addNetworkInterceptor(stripEmptyXRequestedWith)
 
-    // The site's reader calls this API without cookies. A refusal fails right away instead of starting the host's
-    // CloudflareInterceptor, whose solve can't use a clearance this client doesn't send.
+    // The page list call goes through a plain OkHttp client: through the host app's client (its interceptors,
+    // DoH, DNS) the server answers 200 with an empty body. No cookies, as in the site's own reader.
     private val lelClient: OkHttpClient by lazy {
-        client.newBuilder()
-            .apply { interceptors().removeAll { it.javaClass.simpleName == "CloudflareInterceptor" } }
-            .cookieJar(CookieJar.NO_COOKIES)
+        OkHttpClient.Builder()
+            .protocols(listOf(Protocol.HTTP_1_1))
             .build()
     }
 
@@ -193,6 +194,11 @@ abstract class ScanManga : KeiSource() {
     private val multipleSpaces = Regex("""\s+""")
 
     private fun dataAPI(data: String, idc: Int): UrlPayload {
+        // The server answers 200 with an empty body when it rejects the request
+        if (data.isBlank()) {
+            error("Réponse vide de l'API des pages : requête refusée par le site.")
+        }
+
         if (data.contains("error")) {
             error("Received error response from data API: ${multipleSpaces.replace(data, " ").trim()}")
         }
@@ -205,19 +211,55 @@ abstract class ScanManga : KeiSource() {
         return String(Base64.decode(reversed, Base64.DEFAULT)).parseAs<UrlPayload>()
     }
 
+    // The site's script fills the "d" field of the request with a fingerprint of the page, joined by "|"
+    // (index 3 is the start of the User-Agent's SHA-256). Computed inside our WebView, fields 0, 1 and 4 differ from
+    // a regular browser and the server answers 200 with an empty body. A regular browser always sends these values,
+    // so they are put back; fields 2 and 3 are left as captured.
+    private val fingerprintRegex = Regex(""""d":"([^"]*)"""")
+
+    private fun cleanLelBody(body: String): String = fingerprintRegex.replace(body) { match ->
+        val parts = match.groupValues[1].split("|").toMutableList()
+        if (parts.size == 5) {
+            parts[0] = "e3b0c44298fc"
+            parts[1] = "4e1e940bfae6"
+            parts[4] = "f56ebc75c021"
+        }
+        """"d":"${parts.joinToString("|")}""""
+    }
+
     override suspend fun getPageList(chapter: SChapter): List<Page> {
         val chapterUrl = getChapterUrl(chapter)
         val chapterId = chapterUrl.substringAfterLast('_').substringBefore('.').toInt()
         val lelCall = captureLelCall(chapterUrl, chapterId)
             ?: throw Exception("Challenge Cloudflare. Résolvez-le dans la WebView, fermez-la et réessayez.")
 
-        // Sent from the app: from the chapter page this call needs a CORS preflight, which fails in a WebView
-        val lelHeaders = headers.newBuilder()
+        // Sent from the app: from the chapter page this call needs a CORS preflight, which fails in a WebView.
+        // The headers a browser adds itself to a cross-origin fetch are added back: the server refuses a call without Origin.
+        // Host goes first, as in a browser: OkHttp appends it last by default, and the server refuses that order.
+        val lelHeaders = Headers.Builder()
+            .add("Host", lelCall.url.toHttpUrl().host)
+            .addAll(headers)
             .apply { lelCall.headers.forEach { (name, value) -> set(name, value) } }
+            .set("Accept-Encoding", "identity")
+            .removeAll("X-Requested-With")
+            .set("Accept", "*/*")
+            .set("Origin", baseUrl.trimEnd('/'))
+            .set("Sec-Fetch-Dest", "empty")
+            .set("Sec-Fetch-Mode", "cors")
+            .set("Sec-Fetch-Site", "same-site")
             .build()
 
-        return lelClient.post(lelCall.url, lelHeaders, Fetch.XHR.from(chapterUrl), lelCall.body.toRequestBody(JSON_MEDIA_TYPE))
-            .use { dataAPI(it.body.string(), chapterId) }
+        val request = Request.Builder()
+            .url(lelCall.url)
+            .headers(lelHeaders)
+            .post(cleanLelBody(lelCall.body).toRequestBody(JSON_MEDIA_TYPE))
+            .build()
+
+        val raw = withContext(Dispatchers.IO) {
+            lelClient.newCall(request).execute().use { it.body.string() }
+        }
+
+        return dataAPI(raw, chapterId)
             .generateImageUrls()
             .map { Page(it.first, imageUrl = it.second) }
     }
