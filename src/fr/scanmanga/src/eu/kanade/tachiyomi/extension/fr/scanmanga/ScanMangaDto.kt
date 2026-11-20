@@ -37,12 +37,6 @@ class LelCall(
 )
 
 @Serializable
-class LelReply(
-    val status: Int,
-    val body: String,
-)
-
-@Serializable
 class MangaSearchDto(
     val title: List<MangaItemDto>?,
 )
@@ -52,4 +46,19 @@ class MangaItemDto(
     @SerialName("nom_match") val nomMatch: String,
     val url: String,
     val image: String,
+)
+
+@Serializable
+class TopRequest(
+    val offset: Int,
+    val limit: Int,
+    val top: String,
+)
+
+@Serializable
+class TopSeriesConfig(
+    val offset: Int,
+    val limit: Int,
+    val max: Int,
+    val top: String,
 )
