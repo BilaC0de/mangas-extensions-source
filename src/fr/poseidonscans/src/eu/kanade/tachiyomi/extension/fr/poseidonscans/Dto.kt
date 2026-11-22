@@ -16,13 +16,6 @@ class LatestApiResponse(
 )
 
 @Serializable
-class PopularMangaData(
-    val id: String,
-    val title: String,
-    val slug: String,
-)
-
-@Serializable
 class MangaPageDetailsData(
     val isPremiumUser: Boolean?,
     val manga: MangaDetailsData,
