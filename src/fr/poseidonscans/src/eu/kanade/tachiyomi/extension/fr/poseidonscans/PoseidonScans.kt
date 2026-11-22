@@ -10,19 +10,17 @@ import eu.kanade.tachiyomi.source.model.MangasPage
 import eu.kanade.tachiyomi.source.model.Page
 import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
-import eu.kanade.tachiyomi.source.model.SMangaUpdate
 import keiyoushi.annotation.Source
 import keiyoushi.network.Fetch
 import keiyoushi.network.get
 import keiyoushi.source.KeiSource
+import keiyoushi.source.SMangaUpdate
 import keiyoushi.utils.asJsoup
 import keiyoushi.utils.extractNextJs
 import keiyoushi.utils.extractNextJsRsc
 import keiyoushi.utils.firstInstanceOrNull
 import keiyoushi.utils.getPreferencesLazy
 import keiyoushi.utils.parseAs
-import kotlinx.coroutines.async
-import kotlinx.coroutines.coroutineScope
 import kotlinx.serialization.json.JsonElement
 import okhttp3.CacheControl
 import okhttp3.Headers
@@ -43,9 +41,6 @@ abstract class PoseidonScans :
     val rscHeaders: Headers get() = headers.newBuilder().add("RSC", "1").build()
 
     private val preferences: SharedPreferences by getPreferencesLazy()
-
-    // /series is protected by Cloudflare: opening it in the WebView lets the user solve the challenge once.
-    override fun getHomeUrl(): String = "$baseUrl/series"
 
     private fun String.toAbsoluteUrl(): String = if (this.startsWith("http")) this else baseUrl + this
 
@@ -95,12 +90,10 @@ abstract class PoseidonScans :
         chapters: List<SChapter>,
         fetchDetails: Boolean,
         fetchChapters: Boolean,
-    ): SMangaUpdate = coroutineScope {
-        val details = if (fetchDetails) async { fetchDetails(manga) } else null
-        val chapterList = if (fetchChapters) async { fetchChapterList(manga) } else null
-
-        SMangaUpdate(details?.await() ?: manga, chapterList?.await() ?: chapters)
-    }
+    ): SMangaUpdate = SMangaUpdate(
+        manga = { if (fetchDetails) fetchDetails(manga) else manga },
+        chapters = { if (fetchChapters) fetchChapterList(manga) else chapters },
+    )
 
     private suspend fun fetchDetails(manga: SManga): SManga {
         val document = client.get(getMangaUrl(manga), Fetch.DOCUMENT).asJsoup()
