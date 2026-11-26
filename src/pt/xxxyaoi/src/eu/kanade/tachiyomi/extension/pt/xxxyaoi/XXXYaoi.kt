@@ -6,11 +6,13 @@ import eu.kanade.tachiyomi.source.model.Page
 import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
 import keiyoushi.annotation.Source
+import keiyoushi.network.Fetch
 import keiyoushi.network.fetch
 import keiyoushi.network.rateLimit
 import keiyoushi.source.KeiSource
 import keiyoushi.source.SMangaUpdate
 import keiyoushi.utils.MarkdownDescription
+import keiyoushi.utils.asJsoup
 import keiyoushi.utils.attrOrNull
 import keiyoushi.utils.firstInstance
 import keiyoushi.utils.firstInstanceOrNull
@@ -18,6 +20,7 @@ import keiyoushi.utils.getStringOrNull
 import keiyoushi.utils.parseAs
 import keiyoushi.utils.textOrNull
 import keiyoushi.utils.toJsonElement
+import keiyoushi.utils.toJsonString
 import keiyoushi.utils.tryParseDate
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.buildJsonObject
@@ -160,20 +163,29 @@ abstract class XXXYaoi : KeiSource() {
     }
 
     override suspend fun getPageList(chapter: SChapter): List<Page> {
-        val document = sitePages.document(getChapterUrl(chapter), "reader.js", carrySession = true)
-        if (document.selectFirst("iframe[src*=player]") != null) return emptyList()
-        val pages = document.select("img").mapNotNull { image ->
-            image.attributes().firstOrNull { "/WP-manga/data/" in it.value }?.let { image.absUrl(it.key) }
+        val read = sitePages.read(getChapterUrl(chapter), "reader.js", carrySession = true)
+        val reader = read.document
+        if (reader.pages.isEmpty()) {
+            val document = reader.html.asJsoup(reader.url)
+            if (document.selectFirst("iframe[src*=player]") != null) return emptyList()
+            if (document.selectFirst("iframe[src*=challenges.cloudflare.com], input[name=cf-turnstile-response]") != null) {
+                throw IOException(SitePages.SOLVE_IN_WEBVIEW)
+            }
+            throw IOException("As páginas do capítulo não carregaram, tente novamente")
         }
-        if (pages.isEmpty() && document.selectFirst("iframe[src*=challenges.cloudflare.com], input[name=cf-turnstile-response]") != null) {
-            throw IOException(SitePages.SOLVE_IN_WEBVIEW)
+        return reader.pages.mapIndexed { index, imageUrl ->
+            val siteHeaders = read.imageHeaders[imageUrl].orEmpty().toJsonString()
+            Page(index, url = reader.url.toHttpUrl().newBuilder().fragment(siteHeaders).build().toString(), imageUrl = imageUrl)
         }
-        return pages.mapIndexed { index, imageUrl -> Page(index, document.location(), imageUrl) }
     }
 
-    override fun getImageRequest(page: Page): Request = super.getImageRequest(page).newBuilder()
-        .fetch(imageFetch.from(page.url))
-        .build()
+    override fun getImageRequest(page: Page): Request {
+        val siteHeaders = page.url.toHttpUrl().fragment?.parseAs<Map<String, String>>().orEmpty()
+        return super.getImageRequest(page).newBuilder()
+            .apply { siteHeaders.forEach { (name, value) -> header(name, value) } }
+            .fetch(Fetch.XHR.from(page.url))
+            .build()
+    }
 
     override suspend fun fetchRelatedMangaList(manga: SManga): List<SManga> = seriesDocument(getMangaUrl(manga))
         .select("a.xyaoi-scan-work-item")
